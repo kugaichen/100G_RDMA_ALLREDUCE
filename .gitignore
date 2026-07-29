@@ -1,0 +1,43 @@
+# Vivado generated state
+.Xil/
+*.cache/
+*.gen/
+*.hw/
+*.ip_user_files/
+*.runs/
+*.sim/
+*.jou
+*.log
+*.str
+*.pb
+*.wdb
+*.dcp
+*.bit
+*.ltx
+*.bin
+*.rpt
+
+# Hardware and packet captures
+artifacts/
+logs/
+*.ila
+*.pcap
+*.pcapng
+*.runtime
+
+# Local backup files
+*.orig
+*.pre_*
+*.backup.*
+*~
+
+# Worker build output
+worker_rdma_qp/worker_rdma_qp
+worker_rdma_qp/*.o
+
+# Editors and operating systems
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+

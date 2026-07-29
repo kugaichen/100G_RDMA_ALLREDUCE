@@ -58,7 +58,7 @@ module allreduce_offload_top#(
     // Parser -> FIFO
     parameter FIFO_DEPTH                = 32,
     parameter HASH_KEY_WIDTH            = 160,
-    parameter HASH_DATA_WIDTH           = 1,
+    parameter HASH_DATA_WIDTH           = 9,
 
     // state controll
     parameter FAN_IN                    = 2,                           // 通信组数量 
@@ -160,6 +160,12 @@ module allreduce_offload_top#(
     // DEBUG: parser 抽出的 peer_mac/peer_ip 最低字节 (ILA 用, 验证字节序)
     wire [7:0]                                                  parser_dbg_s1_peer_mac_lsb;
     wire [7:0]                                                  parser_dbg_s1_peer_ip_lsb;
+    wire                                                        parser_dbg_s3_valid;
+    wire                                                        parser_dbg_lookup_hit;
+    wire                                                        parser_dbg_endpoint_match;
+    wire                                                        parser_dbg_send_only_match;
+    wire [7:0]                                                  parser_dbg_opcode;
+    wire [23:0]                                                 parser_dbg_qpn;
 
     // AETH 字段 (parser -> deparser, 用于 ACK 重构真值透传)
     wire [7:0]                                                  parser_aeth_syndrome;
@@ -321,6 +327,11 @@ module allreduce_offload_top#(
         .agg_payload_fire_en(parser_to_aggregator_agg_payload_fire_en),
         .agg_ready_in(aggregator_to_parser_ready),
 
+        .cfg_local_mac(cfg_my_mac_p0),
+        .cfg_local_ip(cfg_my_ip_p0),
+        .cfg_local_udp_port(cfg_my_port_p0),
+        .cfg_local_qpn(cfg_my_qp_p0),
+
         // Payload BRAM Interface
         .payload_wr_addr(parser_to_aggregator_payload_wr_addr),
         .payload_wr_data(parser_to_aggregator_payload_wr_data),
@@ -331,6 +342,12 @@ module allreduce_offload_top#(
         // DEBUG: parser 抽出的 peer_mac/peer_ip 低字节, 用于上板确认字节序
         .dbg_s1_peer_mac_lsb(parser_dbg_s1_peer_mac_lsb),
         .dbg_s1_peer_ip_lsb (parser_dbg_s1_peer_ip_lsb),
+        .dbg_s3_valid        (parser_dbg_s3_valid),
+        .dbg_lookup_hit      (parser_dbg_lookup_hit),
+        .dbg_endpoint_match  (parser_dbg_endpoint_match),
+        .dbg_send_only_match (parser_dbg_send_only_match),
+        .dbg_opcode          (parser_dbg_opcode),
+        .dbg_qpn             (parser_dbg_qpn),
 
         // AETH 字段输出
         .agg_aeth_syndrome_out(parser_aeth_syndrome),
@@ -501,11 +518,12 @@ module allreduce_offload_top#(
 //   3    |   1  | m_axis_tvalid                        | deparser 17 拍输出
 //   4    |   1  | m_axis_tlast                         | 包末
 //   5    |   3  | m_axis_route_type                    | =1 即 ROUTE_TO_PARENT
-//   6    |  32  | parser_to_deparser_header_out[263:232]| [环节1] parser 送的 peer_mac 低 32
-//   7    |  32  | deparser.header_for_pkt[263:232]     | [环节2] deparser 存读后的 mac
-//   8    |  32  | deparser.constructed_header[31:0]    | [环节3] 组合后 tdata 低 32
+//   6    |  32  | {s3_valid, hash_hit, endpoint_match, send_only,
+//                  opcode, dst_mac_lsb, dst_ip_lsb, 4'b0}
+//   7    |  32  | {8'h00, parsed_dst_qpn[23:0]}
+//   8    |  32  | deparser.constructed_header[31:0]
 //   9    |  32  | m_axis_tdata[31:0]                   | [环节4] 最终 FF 输出低 32
-//  10    |  32  | m_axis_tdata[63:32]                  | payload 字段高位
+//  10    |  32  | m_axis_tdata[63:32]
 // --- 第二批 (定位 route_type=0) ---
 //  11    |   3  | deparser.current_state               | FAN 那拍 FSM 在哪
 //                                                        IDLE=0 / PASS_THROUGH=1 /
@@ -513,7 +531,7 @@ module allreduce_offload_top#(
 //  12    |   1  | header_v[from_agg_metadata_in[15:8]] | agg 读的 slot 是否有效
 //  13    |   8  | from_agg_metadata_in[15:8]           | agg 侧 slot 号
 //  14    |   8  | metadata_slot_r                      | parser 侧 slot 号
-//  15    |   1  | header_valid_r                       | parser 写 header_mem 使能
+//  15    |   1  | parser s3_valid                      | parser 已收到完整头部
 //  16    |   1  | agg_req_valid                        | deparser 看到的 agg 请求 OR
 //
 // 判定矩阵 (trigger = probe1==R, 抓 FAN 那拍):
@@ -550,8 +568,15 @@ always @(posedge clk) begin
     ila_m_axis_tvalid            <= m_axis_tvalid;
     ila_m_axis_tlast             <= m_axis_tlast;
     ila_m_axis_route_type        <= m_axis_route_type;
-    ila_parser_peer_mac_lo       <= parser_to_deparser_header_out[263:232];
-    ila_dep_header_for_pkt_lo    <= deparser_dbg_header_for_pkt_lo;
+    ila_parser_peer_mac_lo       <= {parser_dbg_s3_valid,
+                                     parser_dbg_lookup_hit,
+                                     parser_dbg_endpoint_match,
+                                     parser_dbg_send_only_match,
+                                     parser_dbg_opcode,
+                                     parser_dbg_s1_peer_mac_lsb,
+                                     parser_dbg_s1_peer_ip_lsb,
+                                     4'b0000};
+    ila_dep_header_for_pkt_lo    <= {8'h00, parser_dbg_qpn};
     ila_dep_constructed_lo       <= deparser_dbg_constructed_header_lo;
     ila_m_axis_tdata_lo          <= m_axis_tdata[31:0];
     ila_m_axis_tdata_hi          <= m_axis_tdata[63:32];
@@ -559,7 +584,7 @@ always @(posedge clk) begin
     ila_dep_header_v_at_agg_slot <= deparser_dbg_header_v_at_agg_slot;
     ila_dep_from_agg_slot        <= deparser_dbg_from_agg_slot;
     ila_dep_parser_slot_r        <= deparser_dbg_parser_slot_r;
-    ila_dep_header_valid_r       <= deparser_dbg_header_valid_r;
+    ila_dep_header_valid_r       <= parser_dbg_s3_valid;
     ila_dep_agg_req_valid        <= deparser_dbg_agg_req_valid;
 end
 

@@ -902,6 +902,19 @@ module tb_allreduce_switch_datapath;
     wire [NUM_PORTS-1:0] s_axis_tready;
     reg  [NUM_PORTS-1:0] s_axis_tlast;
 
+    // Runtime AllReduce configuration (models VIO outputs).
+    reg         ar_cfg_update_en = 1'b0;
+    localparam [47:0] CFG_FPGA_MAC = 48'h020000000307;
+    localparam [31:0] CFG_FPGA_IP  = 32'hC0A80307;
+    localparam [23:0] CFG_FPGA_QPN = 24'h000100;
+    localparam [15:0] CFG_UDP_PORT = 16'd4791;
+    localparam [47:0] CFG_W0_MAC   = 48'h6CB31188AB3E;
+    localparam [31:0] CFG_W0_IP    = 32'hC0A80305;
+    localparam [23:0] CFG_W0_QPN   = 24'h000087;
+    localparam [47:0] CFG_W1_MAC   = 48'h6CB31188A94E;
+    localparam [31:0] CFG_W1_IP    = 32'hC0A80306;
+    localparam [23:0] CFG_W1_QPN   = 24'h000087;
+
     // Egress (4 ports)
     wire [DATA_W-1:0]   m_axis_tdata  [0:NUM_PORTS-1];
     wire [KEEP_W-1:0]   m_axis_tkeep  [0:NUM_PORTS-1];
@@ -929,6 +942,31 @@ module tb_allreduce_switch_datapath;
         .axi_resetn  (rst_n),
         .allreduce_clk   (clk),
         .allreduce_rst_n (rst_n),
+
+        .ar_cfg_update_en        (ar_cfg_update_en),
+        .ar_cfg_parent_port      (8'h00),
+        .ar_cfg_child_port_mask  (4'h3),
+        .ar_cfg_is_root          (1'b1),
+        .ar_cfg_fpga_mac         (CFG_FPGA_MAC),
+        .ar_cfg_fpga_ip          (CFG_FPGA_IP),
+        .ar_cfg_fpga_qp          (CFG_FPGA_QPN),
+        .ar_cfg_fpga_udp_port    (CFG_UDP_PORT),
+        .ar_cfg_worker0_mac      (CFG_W0_MAC),
+        .ar_cfg_worker0_ip       (CFG_W0_IP),
+        .ar_cfg_worker0_qp       (CFG_W0_QPN),
+        .ar_cfg_worker0_udp_port (CFG_UDP_PORT),
+        .ar_cfg_worker1_mac      (CFG_W1_MAC),
+        .ar_cfg_worker1_ip       (CFG_W1_IP),
+        .ar_cfg_worker1_qp       (CFG_W1_QPN),
+        .ar_cfg_worker1_udp_port (CFG_UDP_PORT),
+        .ar_cfg_worker2_mac      (48'h0),
+        .ar_cfg_worker2_ip       (32'h0),
+        .ar_cfg_worker2_qp       (24'h0),
+        .ar_cfg_worker2_udp_port (16'h0),
+        .ar_cfg_worker3_mac      (48'h0),
+        .ar_cfg_worker3_ip       (32'h0),
+        .ar_cfg_worker3_qp       (24'h0),
+        .ar_cfg_worker3_udp_port (16'h0),
 
         // AXI-Lite: tie off
         .S0_AXI_AWADDR(32'h0),.S0_AXI_AWVALID(1'b0),.S0_AXI_WDATA(32'h0),
@@ -1024,7 +1062,7 @@ module tb_allreduce_switch_datapath;
         reg [15:0] ip_total_len;
         begin
             beat = {DATA_W{1'b0}};
-            udp_total_len = 16'd8 + 16'd12 + payload_len;
+            udp_total_len = 16'd8 + 16'd12 + payload_len + 16'd4;
             ip_total_len  = 16'd20 + udp_total_len;
 
             // Ethernet (wire byte 0~13): host MSB -> wire byte 0 -> beat LSB
@@ -1126,11 +1164,14 @@ module tb_allreduce_switch_datapath;
         input [DATA_W-1:0] header_beat;
         input [TUSER_W-1:0] tuser;
         input integer num_payload_beats;
+        input [7:0] payload_byte;
         integer i;
         begin
             // Beat 0: header
             @(posedge clk);
-            s_axis_tdata[port]  <= header_beat;
+            // A 512-bit first beat contains the 54-byte RoCE header plus
+            // the first 10 payload bytes, matching the RNIC wire layout.
+            s_axis_tdata[port]  <= {{10{payload_byte}}, header_beat[431:0]};
             s_axis_tkeep[port]  <= {KEEP_W{1'b1}};
             s_axis_tuser[port]  <= tuser;
             s_axis_tvalid[port] <= 1'b1;
@@ -1140,8 +1181,9 @@ module tb_allreduce_switch_datapath;
 
             // Payload beats
             for (i = 0; i < num_payload_beats; i = i + 1) begin
-                s_axis_tdata[port] <= {16{32'h0000_0001 + i}};
-                s_axis_tkeep[port] <= {KEEP_W{1'b1}};
+                s_axis_tdata[port] <= {64{payload_byte}};
+                s_axis_tkeep[port] <= (i == num_payload_beats - 1) ?
+                                      {6'b0, {58{1'b1}}} : {KEEP_W{1'b1}};
                 s_axis_tlast[port] <= (i == num_payload_beats - 1) ? 1'b1 : 1'b0;
                 @(posedge clk);
                 while (!s_axis_tready[port]) @(posedge clk);
@@ -1152,12 +1194,51 @@ module tb_allreduce_switch_datapath;
         end
     endtask
 
+    task send_rejected_header_case;
+        input integer case_id;
+        input [DATA_W-1:0] rejected_header;
+        integer accepted_before;
+        begin
+            accepted_before = parser_send_only_accept_count +
+                              parser_ack_accept_count;
+            send_packet_1beat(0, rejected_header,
+                              {2'b00, {62{1'b1}}},
+                              build_tuser(8'h01, 16'd62));
+            repeat(80) @(posedge clk);
+            if ((parser_send_only_accept_count +
+                 parser_ack_accept_count) != accepted_before) begin
+                $display("PHASE7_NEGATIVE_FAIL case=%0d entered protocol path",
+                         case_id);
+                negative_filter_errors = negative_filter_errors + 1;
+            end else begin
+                $display("PHASE7_NEGATIVE_PASS case=%0d", case_id);
+            end
+        end
+    endtask
+
     // ================================================================
     // Egress monitor: capture and log packets on all output ports
     // ================================================================
     reg [31:0] egress_pkt_count [0:NUM_PORTS-1];
     reg [DATA_W-1:0] egress_first_beat [0:NUM_PORTS-1];
     reg [7:0] egress_dst_port [0:NUM_PORTS-1];
+    reg ack_reflect_seen_port0;
+    reg ack_reflect_seen_port1;
+    integer ack_reflect_count_port0;
+    integer ack_reflect_count_port1;
+    reg [NUM_PORTS-1:0] payload_psn0_ok;
+    reg [NUM_PORTS-1:0] payload_psn1_ok;
+    reg [31:0] current_data_psn [0:NUM_PORTS-1];
+    reg current_data_packet [0:NUM_PORTS-1];
+    reg current_data_header_payload_ok [0:NUM_PORTS-1];
+    reg [NUM_PORTS-1:0] output_xz_seen;
+    integer parser_send_only_accept_count;
+    integer parser_ack_accept_count;
+    integer typer_ack_up_count;
+    integer down_broadcast_count;
+    integer negative_filter_errors;
+    integer first_arrival_aggregate_count;
+    integer retrans_read_count;
 
     reg [31:0] egress_beat_count [0:NUM_PORTS-1];
 
@@ -1168,7 +1249,19 @@ module tb_allreduce_switch_datapath;
                 if (!rst_n) begin
                     egress_pkt_count[gi] <= 0;
                     egress_beat_count[gi] <= 0;
+                    output_xz_seen[gi] <= 1'b0;
+                    payload_psn0_ok[gi] <= 1'b0;
+                    payload_psn1_ok[gi] <= 1'b0;
+                    current_data_psn[gi] <= 0;
+                    current_data_packet[gi] <= 1'b0;
+                    current_data_header_payload_ok[gi] <= 1'b0;
                 end else if (m_axis_tvalid[gi] && m_axis_tready[gi]) begin
+                    if (((^m_axis_tdata[gi]) === 1'bx) ||
+                        ((^m_axis_tkeep[gi]) === 1'bx) ||
+                        (m_axis_tlast[gi] === 1'bx) ||
+                        ((^m_axis_tuser[gi]) === 1'bx))
+                        output_xz_seen[gi] <= 1'b1;
+
                     egress_beat_count[gi] <= egress_beat_count[gi] + 1;
 
                     // Print every beat (完整 tdata, 用于 ICRC 离线对照)
@@ -1186,10 +1279,137 @@ module tb_allreduce_switch_datapath;
                     end
                     if (!m_axis_tlast[gi] || (m_axis_tlast[gi] && egress_pkt_count[gi] == 0))
                         egress_first_beat[gi] <= m_axis_tdata[gi];
+
+                    if ((egress_beat_count[gi] == 0) &&
+                        (m_axis_tdata[gi][343:336] == OPCODE_SEND_ONLY)) begin
+                        current_data_packet[gi] <= 1'b1;
+                        current_data_psn[gi] <=
+                            {m_axis_tdata[gi][407:400],
+                             m_axis_tdata[gi][415:408],
+                             m_axis_tdata[gi][423:416],
+                             m_axis_tdata[gi][431:424]} & 32'h00ff_ffff;
+                        current_data_header_payload_ok[gi] <=
+                            (m_axis_tdata[gi][511:432] == {10{8'hff}});
+                    end
+                    else if ((egress_beat_count[gi] == 1) &&
+                             current_data_packet[gi]) begin
+                        if (current_data_header_payload_ok[gi] &&
+                            (m_axis_tdata[gi] == {64{8'hff}})) begin
+                            if (current_data_psn[gi] == 0)
+                                payload_psn0_ok[gi] <= 1'b1;
+                            if (current_data_psn[gi] == 1)
+                                payload_psn1_ok[gi] <= 1'b1;
+                        end
+                        current_data_packet[gi] <= 1'b0;
+                    end
                 end
             end
         end
     endgenerate
+
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            ack_reflect_seen_port0 <= 1'b0;
+            ack_reflect_count_port0 <= 0;
+        end else if (m_axis_tvalid[0] && m_axis_tready[0] &&
+                     (egress_beat_count[0] == 0) &&
+                     (m_axis_tkeep[0] == {2'b00, {62{1'b1}}}) &&
+                     (m_axis_tlast[0] == 1'b1) &&
+                     ({m_axis_tdata[0][  7:  0], m_axis_tdata[0][ 15:  8],
+                       m_axis_tdata[0][ 23: 16], m_axis_tdata[0][ 31: 24],
+                       m_axis_tdata[0][ 39: 32], m_axis_tdata[0][ 47: 40]} ==
+                      CFG_W0_MAC) &&
+                     ({m_axis_tdata[0][ 55: 48], m_axis_tdata[0][ 63: 56],
+                       m_axis_tdata[0][ 71: 64], m_axis_tdata[0][ 79: 72],
+                       m_axis_tdata[0][ 87: 80], m_axis_tdata[0][ 95: 88]} ==
+                      CFG_FPGA_MAC) &&
+                     ({m_axis_tdata[0][215:208], m_axis_tdata[0][223:216],
+                       m_axis_tdata[0][231:224], m_axis_tdata[0][239:232]} ==
+                      CFG_FPGA_IP) &&
+                     ({m_axis_tdata[0][247:240], m_axis_tdata[0][255:248],
+                       m_axis_tdata[0][263:256], m_axis_tdata[0][271:264]} ==
+                      CFG_W0_IP) &&
+                     ({m_axis_tdata[0][295:288], m_axis_tdata[0][303:296]} ==
+                      16'd4791) &&
+                     (m_axis_tdata[0][343:336] == OPCODE_ACK) &&
+                     ({m_axis_tdata[0][375:368],
+                       m_axis_tdata[0][383:376],
+                       m_axis_tdata[0][391:384],
+                       m_axis_tdata[0][399:392]} == {8'h00, CFG_W0_QPN}) &&
+                     ({m_axis_tdata[0][407:400], m_axis_tdata[0][415:408],
+                       m_axis_tdata[0][423:416], m_axis_tdata[0][431:424]} ==
+                      32'h00000000)) begin
+            ack_reflect_seen_port0 <= 1'b1;
+            ack_reflect_count_port0 <= ack_reflect_count_port0 + 1;
+        end
+    end
+
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            ack_reflect_seen_port1 <= 1'b0;
+            ack_reflect_count_port1 <= 0;
+        end else if (m_axis_tvalid[1] && m_axis_tready[1] &&
+                     (egress_beat_count[1] == 0) &&
+                     (m_axis_tkeep[1] == {2'b00, {62{1'b1}}}) &&
+                     (m_axis_tlast[1] == 1'b1) &&
+                     ({m_axis_tdata[1][  7:  0], m_axis_tdata[1][ 15:  8],
+                       m_axis_tdata[1][ 23: 16], m_axis_tdata[1][ 31: 24],
+                       m_axis_tdata[1][ 39: 32], m_axis_tdata[1][ 47: 40]} ==
+                      CFG_W1_MAC) &&
+                     ({m_axis_tdata[1][ 55: 48], m_axis_tdata[1][ 63: 56],
+                       m_axis_tdata[1][ 71: 64], m_axis_tdata[1][ 79: 72],
+                       m_axis_tdata[1][ 87: 80], m_axis_tdata[1][ 95: 88]} ==
+                      CFG_FPGA_MAC) &&
+                     ({m_axis_tdata[1][215:208], m_axis_tdata[1][223:216],
+                       m_axis_tdata[1][231:224], m_axis_tdata[1][239:232]} ==
+                      CFG_FPGA_IP) &&
+                     ({m_axis_tdata[1][247:240], m_axis_tdata[1][255:248],
+                       m_axis_tdata[1][263:256], m_axis_tdata[1][271:264]} ==
+                      CFG_W1_IP) &&
+                     ({m_axis_tdata[1][295:288], m_axis_tdata[1][303:296]} ==
+                      16'd4791) &&
+                     (m_axis_tdata[1][343:336] == OPCODE_ACK) &&
+                     ({m_axis_tdata[1][375:368],
+                       m_axis_tdata[1][383:376],
+                       m_axis_tdata[1][391:384],
+                       m_axis_tdata[1][399:392]} == {8'h00, CFG_W1_QPN}) &&
+                     ({m_axis_tdata[1][407:400], m_axis_tdata[1][415:408],
+                       m_axis_tdata[1][423:416], m_axis_tdata[1][431:424]} ==
+                      32'h00000001)) begin
+            ack_reflect_seen_port1 <= 1'b1;
+            ack_reflect_count_port1 <= ack_reflect_count_port1 + 1;
+        end
+    end
+
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            parser_send_only_accept_count <= 0;
+            parser_ack_accept_count <= 0;
+            typer_ack_up_count <= 0;
+            down_broadcast_count <= 0;
+            first_arrival_aggregate_count <= 0;
+            retrans_read_count <= 0;
+        end else begin
+            if (u_dut.u_allreduce_wrapper.u_allreduce.allreduce_parser.s4_valid &&
+                u_dut.u_allreduce_wrapper.u_allreduce.allreduce_parser.s4_aggregate_en) begin
+                if (u_dut.u_allreduce_wrapper.u_allreduce.allreduce_parser.s4_opcode ==
+                    OPCODE_SEND_ONLY)
+                    parser_send_only_accept_count <= parser_send_only_accept_count + 1;
+                if (u_dut.u_allreduce_wrapper.u_allreduce.allreduce_parser.s4_opcode ==
+                    OPCODE_ACK)
+                    parser_ack_accept_count <= parser_ack_accept_count + 1;
+            end
+            if (u_dut.u_allreduce_wrapper.u_allreduce.u_aggregator.allreduce_typer.s2_valid &&
+                u_dut.u_allreduce_wrapper.u_allreduce.u_aggregator.allreduce_typer.ack_up_en)
+                typer_ack_up_count <= typer_ack_up_count + 1;
+            if (u_dut.u_allreduce_wrapper.u_allreduce.aggregator_to_deparser_down_broadcast_en_out)
+                down_broadcast_count <= down_broadcast_count + 1;
+            if (u_dut.u_allreduce_wrapper.u_allreduce.u_aggregator.up_retrans_to_buffer_aggregate_payload_en)
+                first_arrival_aggregate_count <= first_arrival_aggregate_count + 1;
+            if (u_dut.u_allreduce_wrapper.u_allreduce.u_aggregator.up_retrans_to_buffer_read_buffer_en)
+                retrans_read_count <= retrans_read_count + 1;
+        end
+    end
 
     // ================================================================
     // Hash Connection Table Backdoor Config
@@ -1203,7 +1423,7 @@ module tb_allreduce_switch_datapath;
     localparam HASH_WIDTH     = 8;
 
     // 使用 hash_connection_table 内部静态 entry 的值 (160-bit key)
-    reg [47:0] hit_src_mac_0  = 48'hB8599F011122;   // worker1 MAC
+    reg [47:0] hit_src_mac_0  = CFG_W0_MAC;
     reg [47:0] hit_dst_mac_0  = 48'h020000000307;   // FPGA root MAC
     reg [31:0] hit_src_ip_0   = 32'hC0A80305;       // 192.168.3.5
     reg [31:0] hit_dst_ip_0   = 32'hC0A80307;       // 192.168.3.7
@@ -1223,7 +1443,7 @@ module tb_allreduce_switch_datapath;
     );
 
     // Connection 1: root_info=1 (this node is root, worker2)
-    reg [47:0] hit_src_mac_1  = 48'hB8599F011258;   // worker2 MAC
+    reg [47:0] hit_src_mac_1  = CFG_W1_MAC;
     reg [47:0] hit_dst_mac_1  = 48'h020000000307;   // FPGA root MAC
     reg [31:0] hit_src_ip_1   = 32'hC0A80306;       // 192.168.3.6
     reg [31:0] hit_dst_ip_1   = 32'hC0A80307;       // 192.168.3.7
@@ -1266,13 +1486,19 @@ module tb_allreduce_switch_datapath;
     // Test Scenarios
     // ================================================================
     reg [DATA_W-1:0] hdr_beat;
+    integer phase7_errors;
 
     initial begin
         $display("========================================");
         $display("  AllReduce + Switch Datapath Testbench");
         $display("========================================");
+        negative_filter_errors = 0;
 
         wait(rst_n == 1);
+        @(posedge clk);
+        ar_cfg_update_en = 1'b1;
+        @(posedge clk);
+        ar_cfg_update_en = 1'b0;
         repeat(20) @(posedge clk);
 
         // ==========================================================
@@ -1332,15 +1558,15 @@ module tb_allreduce_switch_datapath;
             hit_dst_mac_0, hit_src_mac_0,
             hit_dst_ip_0, hit_src_ip_0,
             hit_dst_port_0, hit_src_port_0,
-            OPCODE_FIRST,
-            32'h00000001,           // QPN
+            OPCODE_SEND_ONLY,
+            {8'h00, CFG_FPGA_QPN},   // QPN
             32'h00000000,           // PSN = 0
             16'd1024,               // payload_len
             hdr_beat
         );
         send_packet_multi(0, hdr_beat,
                           build_tuser(8'h01, 16'd1078),
-                          16);
+                          16, 8'hff);
 
         repeat(50) @(posedge clk);
 
@@ -1349,16 +1575,90 @@ module tb_allreduce_switch_datapath;
             hit_dst_mac_1, hit_src_mac_1,
             hit_dst_ip_1, hit_src_ip_1,
             hit_dst_port_1, hit_src_port_1,
-            OPCODE_FIRST,
-            32'h00000001,
+            OPCODE_SEND_ONLY,
+            {8'h00, CFG_FPGA_QPN},
             32'h00000000,           // same PSN = 0
             16'd1024,
             hdr_beat
         );
         send_packet_multi(1, hdr_beat,
                           build_tuser(8'h02, 16'd1078),
-                          16);
+                          16, 8'h00);
 
+        repeat(500) @(posedge clk);
+
+        // Mirror the hardware sequence: the RNIC ACK for round 0 arrives
+        // before the next SEND_ONLY.  This catches an ACK FIFO-consumption
+        // bug that otherwise only appears on PSN=1 in hardware.
+        $display("\n--- TEST 2c: ACK between PSN=0 and the next data packet ---");
+        build_header_beat(
+            hit_dst_mac_0, hit_src_mac_0,
+            hit_dst_ip_0, hit_src_ip_0,
+            hit_dst_port_0, 16'hC001,
+            OPCODE_ACK,
+            {8'h00, CFG_FPGA_QPN},
+            32'h00000000,
+            16'd4,
+            hdr_beat
+        );
+        send_packet_1beat(0, hdr_beat, {2'b00, {62{1'b1}}},
+                          build_tuser(8'h01, 16'd62));
+        repeat(200) @(posedge clk);
+
+        // ==========================================================
+        // TEST 2d: Worker0 retransmits the same PSN=0. The packet may
+        // trigger cached-result retransmission, but must not perform a
+        // third aggregate payload write.
+        // ==========================================================
+        $display("\n--- TEST 2d: Worker0 duplicate PSN=0 ---");
+        build_header_beat(
+            hit_dst_mac_0, hit_src_mac_0,
+            hit_dst_ip_0, hit_src_ip_0,
+            hit_dst_port_0, hit_src_port_0,
+            OPCODE_SEND_ONLY,
+            {8'h00, CFG_FPGA_QPN},
+            32'h00000000,
+            16'd1024,
+            hdr_beat
+        );
+        send_packet_multi(0, hdr_beat,
+                          build_tuser(8'h01, 16'd1078),
+                          16, 8'hff);
+        repeat(500) @(posedge clk);
+
+        // ==========================================================
+        // TEST 3: Consecutive PSN=1 from both workers.
+        // ==========================================================
+        $display("\n--- TEST 3: Worker0 PSN=1 ---");
+        build_header_beat(
+            hit_dst_mac_0, hit_src_mac_0,
+            hit_dst_ip_0, hit_src_ip_0,
+            hit_dst_port_0, hit_src_port_0,
+            OPCODE_SEND_ONLY,
+            {8'h00, CFG_FPGA_QPN},
+            32'h00000001,
+            16'd1024,
+            hdr_beat
+        );
+        send_packet_multi(0, hdr_beat,
+                          build_tuser(8'h01, 16'd1078),
+                          16, 8'hff);
+        repeat(50) @(posedge clk);
+
+        $display("\n--- TEST 3b: Worker1 PSN=1 ---");
+        build_header_beat(
+            hit_dst_mac_1, hit_src_mac_1,
+            hit_dst_ip_1, hit_src_ip_1,
+            hit_dst_port_1, hit_src_port_1,
+            OPCODE_SEND_ONLY,
+            {8'h00, CFG_FPGA_QPN},
+            32'h00000001,
+            16'd1024,
+            hdr_beat
+        );
+        send_packet_multi(1, hdr_beat,
+                          build_tuser(8'h02, 16'd1078),
+                          16, 8'h00);
         repeat(500) @(posedge clk);
 
         // ==========================================================
@@ -1408,38 +1708,94 @@ module tb_allreduce_switch_datapath;
         build_header_beat(
             hit_dst_mac_0, hit_src_mac_0,
             hit_dst_ip_0, hit_src_ip_0,
-            hit_dst_port_0, hit_src_port_0,
+            hit_dst_port_0, 16'hC001,
             8'h11,                  // OPCODE_ACK
-            32'h00000001,
+            {8'h00, CFG_FPGA_QPN},
             32'h00000000,           // PSN = 0
             16'd4,                  // AETH only (4 bytes)
             hdr_beat
         );
-        send_packet_1beat(0, hdr_beat, {KEEP_W{1'b1}},
+        send_packet_1beat(0, hdr_beat, {2'b00, {62{1'b1}}},
                           build_tuser(8'h01, 16'd62));
 
         repeat(500) @(posedge clk);
 
         // ==========================================================
-        // TEST 5: ACK from child Port1 (worker2 RNIC 回的 transport ACK)
-        //   opcode=0x11, ingress_port=1 < FAN_IN → TYPE_ACK_UP
-        //   Expected: deparser 重构 ACK → ROUTE_TO_CHILD_SINGLE → 回 Port1
+        // TEST 5: Worker1 ACK reflection with egress backpressure
         // ==========================================================
-//        $display("\n--- TEST 5: ACK from child Port1 (TYPE_ACK_UP) ---");
-//        build_header_beat(
-//            hit_dst_mac_1, hit_src_mac_1,
-//            hit_dst_ip_1, hit_src_ip_1,
-//            hit_dst_port_1, hit_src_port_1,
-//            8'h11,                  // OPCODE_ACK
-//            32'h00000001,
-//            32'h00000000,
-//            16'd4,                  // AETH only
-//            hdr_beat
-//        );
-//        send_packet_1beat(1, hdr_beat, {KEEP_W{1'b1}},
-//                          build_tuser(8'h02, 16'd62));
+        $display("\n--- TEST 5: ACK from Port1 with output backpressure ---");
+        build_header_beat(
+            hit_dst_mac_1, hit_src_mac_1,
+            hit_dst_ip_1, hit_src_ip_1,
+            hit_dst_port_1, 16'hC002,
+            OPCODE_ACK,
+            {8'h00, CFG_FPGA_QPN},
+            32'h00000001,
+            16'd4,
+            hdr_beat
+        );
+        @(negedge clk);
+        m_axis_tready[1] = 1'b0;
+        send_packet_1beat(1, hdr_beat, {2'b00, {62{1'b1}}},
+                          build_tuser(8'h02, 16'd62));
+        repeat(100) @(posedge clk);
+        @(negedge clk);
+        m_axis_tready[1] = 1'b1;
+        repeat(500) @(posedge clk);
 
-//        repeat(300) @(posedge clk);
+        // ==========================================================
+        // TEST 6: Six-field negative filtering. Each packet differs
+        // from a legal SEND_ONLY in exactly one required field.
+        // ==========================================================
+        $display("\n--- TEST 6: Six-field negative filtering ---");
+
+        build_header_beat(hit_dst_mac_0, hit_src_mac_0,
+                          hit_dst_ip_0, hit_src_ip_0,
+                          hit_dst_port_0, hit_src_port_0,
+                          OPCODE_SEND_ONLY, {8'h00, CFG_FPGA_QPN},
+                          32'h00000002, 16'd4, hdr_beat);
+        hdr_beat[191:184] = 8'h06;
+        send_rejected_header_case(1, hdr_beat);
+
+        build_header_beat(hit_dst_mac_0, hit_src_mac_0,
+                          hit_dst_ip_0, hit_src_ip_0,
+                          hit_dst_port_0, hit_src_port_0,
+                          OPCODE_SEND_ONLY, {8'h00, CFG_FPGA_QPN},
+                          32'h00000002, 16'd4, hdr_beat);
+        hdr_beat[47:40] = hdr_beat[47:40] ^ 8'h01;
+        send_rejected_header_case(2, hdr_beat);
+
+        build_header_beat(hit_dst_mac_0, hit_src_mac_0,
+                          hit_dst_ip_0, hit_src_ip_0,
+                          hit_dst_port_0, hit_src_port_0,
+                          OPCODE_SEND_ONLY, {8'h00, CFG_FPGA_QPN},
+                          32'h00000002, 16'd4, hdr_beat);
+        hdr_beat[271:264] = hdr_beat[271:264] ^ 8'h01;
+        send_rejected_header_case(3, hdr_beat);
+
+        build_header_beat(hit_dst_mac_0, hit_src_mac_0,
+                          hit_dst_ip_0, hit_src_ip_0,
+                          hit_dst_port_0, hit_src_port_0,
+                          OPCODE_SEND_ONLY, {8'h00, CFG_FPGA_QPN},
+                          32'h00000002, 16'd4, hdr_beat);
+        hdr_beat[303:296] = hdr_beat[303:296] ^ 8'h01;
+        send_rejected_header_case(4, hdr_beat);
+
+        build_header_beat(hit_dst_mac_0, hit_src_mac_0,
+                          hit_dst_ip_0, hit_src_ip_0,
+                          hit_dst_port_0, hit_src_port_0,
+                          OPCODE_SEND_ONLY, {8'h00, CFG_FPGA_QPN},
+                          32'h00000002, 16'd4, hdr_beat);
+        hdr_beat[399:392] = hdr_beat[399:392] ^ 8'h01;
+        send_rejected_header_case(5, hdr_beat);
+
+        build_header_beat(hit_dst_mac_0, hit_src_mac_0,
+                          hit_dst_ip_0, hit_src_ip_0,
+                          hit_dst_port_0, hit_src_port_0,
+                          OPCODE_SEND_ONLY, {8'h00, CFG_FPGA_QPN},
+                          32'h00000002, 16'd4, hdr_beat);
+        hdr_beat[343:336] = 8'h05;
+        send_rejected_header_case(6, hdr_beat);
 
         // ----------------------------------------------------------
         // Summary
@@ -1448,6 +1804,80 @@ module tb_allreduce_switch_datapath;
         $display("  Test Complete. Egress packet counts:");
         for (p = 0; p < NUM_PORTS; p = p + 1)
             $display("    Port%0d: %0d packets", p, egress_pkt_count[p]);
+        phase7_errors = 0;
+        if (parser_send_only_accept_count != 5) begin
+            $display("PHASE7_CHECK_FAIL: parser accepted %0d SEND_ONLY packets, expected 5",
+                     parser_send_only_accept_count);
+            phase7_errors = phase7_errors + 1;
+        end
+        if (first_arrival_aggregate_count != 4) begin
+            $display("PHASE7_CHECK_FAIL: aggregate payload write count=%0d, expected 4",
+                     first_arrival_aggregate_count);
+            phase7_errors = phase7_errors + 1;
+        end
+        if (retrans_read_count < 1) begin
+            $display("PHASE7_CHECK_FAIL: duplicate PSN did not trigger cached-result read");
+            phase7_errors = phase7_errors + 1;
+        end
+        if (parser_ack_accept_count != 3) begin
+            $display("PHASE7_CHECK_FAIL: parser accepted %0d ACK packets, expected 3",
+                     parser_ack_accept_count);
+            phase7_errors = phase7_errors + 1;
+        end
+        if (typer_ack_up_count != 3) begin
+            $display("PHASE7_CHECK_FAIL: Typer classified %0d ACK_UP events, expected 3",
+                     typer_ack_up_count);
+            phase7_errors = phase7_errors + 1;
+        end
+        if (down_broadcast_count < 2) begin
+            $display("PHASE7_CHECK_FAIL: aggregate down-broadcast count=%0d, expected at least 2",
+                     down_broadcast_count);
+            phase7_errors = phase7_errors + 1;
+        end
+        if (!ack_reflect_seen_port0) begin
+            $display("PHASE7_CHECK_FAIL: Port0 reflected ACK fields/length mismatch (QPN=0x%06h)",
+                     CFG_W0_QPN);
+            phase7_errors = phase7_errors + 1;
+        end
+        if (!ack_reflect_seen_port1) begin
+            $display("PHASE7_CHECK_FAIL: Port1 reflected ACK fields/length mismatch (QPN=0x%06h)",
+                     CFG_W1_QPN);
+            phase7_errors = phase7_errors + 1;
+        end
+        if (ack_reflect_count_port0 != 2) begin
+            $display("PHASE7_CHECK_FAIL: Port0 reflected ACK count=%0d, expected 2",
+                     ack_reflect_count_port0);
+            phase7_errors = phase7_errors + 1;
+        end
+        if (ack_reflect_count_port1 != 1) begin
+            $display("PHASE7_CHECK_FAIL: Port1 reflected ACK count=%0d, expected 1",
+                     ack_reflect_count_port1);
+            phase7_errors = phase7_errors + 1;
+        end
+        if (payload_psn0_ok[1:0] != 2'b11) begin
+            $display("PHASE7_CHECK_FAIL: PSN=0 aggregate payload mismatch, port mask=0x%0h",
+                     payload_psn0_ok);
+            phase7_errors = phase7_errors + 1;
+        end
+        if (payload_psn1_ok[1:0] != 2'b11) begin
+            $display("PHASE7_CHECK_FAIL: PSN=1 aggregate payload mismatch after ACK, port mask=0x%0h",
+                     payload_psn1_ok);
+            phase7_errors = phase7_errors + 1;
+        end
+        if (output_xz_seen != {NUM_PORTS{1'b0}}) begin
+            $display("PHASE7_CHECK_FAIL: accepted output contains X/Z, port mask=0x%0h",
+                     output_xz_seen);
+            phase7_errors = phase7_errors + 1;
+        end
+        if (negative_filter_errors != 0) begin
+            $display("PHASE7_CHECK_FAIL: %0d negative filter cases entered protocol path",
+                     negative_filter_errors);
+            phase7_errors = phase7_errors + negative_filter_errors;
+        end
+        if (phase7_errors == 0)
+            $display("PHASE7_TEST_PASS");
+        else
+            $display("PHASE7_TEST_FAIL errors=%0d", phase7_errors);
         $display("========================================");
 
         #1000;
@@ -1580,6 +2010,36 @@ module tb_allreduce_switch_datapath;
                      $time,
                      u_dut.u_output_port_lookup.m_axis_tuser[31:24]);
         end
+    end
+
+    // ================================================================
+    // Monitor: per_port_rewriter 内部 ICRC (Step 2 验证用)
+    //   每个端口在 icrc_done 上升沿打印计算出的 ICRC, 便于与
+    //   verify_icrc_from_sim.py 提取的末拍 byte54-57(数据)/byte58-61(ACK)
+    //   对照, 同时与软件参考 ICRC 三方比对
+    // ================================================================
+    reg rwr0_done_d, rwr1_done_d, rwr2_done_d, rwr3_done_d;
+    always @(posedge clk) begin
+        rwr0_done_d <= u_dut.u_rwr_p0.icrc_done;
+        rwr1_done_d <= u_dut.u_rwr_p1.icrc_done;
+        rwr2_done_d <= u_dut.u_rwr_p2.icrc_done;
+        rwr3_done_d <= u_dut.u_rwr_p3.icrc_done;
+        if (u_dut.u_rwr_p0.icrc_done && !rwr0_done_d)
+            $display("[%0t] RWR Port0: is_roce=%0b is_single=%0b ICRC=0x%08h",
+                     $time, u_dut.u_rwr_p0.is_roce_q, u_dut.u_rwr_p0.is_single_q,
+                     u_dut.u_rwr_p0.icrc_q);
+        if (u_dut.u_rwr_p1.icrc_done && !rwr1_done_d)
+            $display("[%0t] RWR Port1: is_roce=%0b is_single=%0b ICRC=0x%08h",
+                     $time, u_dut.u_rwr_p1.is_roce_q, u_dut.u_rwr_p1.is_single_q,
+                     u_dut.u_rwr_p1.icrc_q);
+        if (u_dut.u_rwr_p2.icrc_done && !rwr2_done_d)
+            $display("[%0t] RWR Port2: is_roce=%0b is_single=%0b ICRC=0x%08h",
+                     $time, u_dut.u_rwr_p2.is_roce_q, u_dut.u_rwr_p2.is_single_q,
+                     u_dut.u_rwr_p2.icrc_q);
+        if (u_dut.u_rwr_p3.icrc_done && !rwr3_done_d)
+            $display("[%0t] RWR Port3: is_roce=%0b is_single=%0b ICRC=0x%08h",
+                     $time, u_dut.u_rwr_p3.is_roce_q, u_dut.u_rwr_p3.is_single_q,
+                     u_dut.u_rwr_p3.icrc_q);
     end
 
     // ================================================================

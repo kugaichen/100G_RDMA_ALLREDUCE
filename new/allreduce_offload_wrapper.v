@@ -109,7 +109,7 @@ module allreduce_offload_wrapper #(
         .m_axis_tkeep            (ar_m_tkeep),
         .m_axis_tvalid           (ar_m_tvalid),
         .m_axis_tlast            (ar_m_tlast),
-        .m_axis_tready           (icrc_s_tready),
+        .m_axis_tready           (m_axis_tready),
         .m_axis_route_type       (ar_m_route_type),
         .m_axis_is_aggregated    (ar_m_is_aggregated),
         .m_axis_agg_ingress_port (ar_m_agg_ingress_port),
@@ -138,7 +138,7 @@ module allreduce_offload_wrapper #(
     // ============================================================
     reg [7:0] agg_ingress_1hot;
     always @(*) begin
-        case (icrc_m_agg_ingress_port)
+        case (ar_m_agg_ingress_port)
             8'd0:    agg_ingress_1hot = 8'h01;
             8'd1:    agg_ingress_1hot = 8'h02;
             8'd2:    agg_ingress_1hot = 8'h04;
@@ -151,19 +151,25 @@ module allreduce_offload_wrapper #(
     // 5. Build output TUSER with dst_port
     // ============================================================
     always @(*) begin
-        if (!icrc_m_is_aggregated) begin
+        if (!ar_m_is_aggregated) begin
             m_axis_tuser = latched_tuser;
         end else begin
             m_axis_tuser = latched_tuser;
-            case (icrc_m_route_type)
+            m_axis_tuser[32] = 1'b1;
+            m_axis_tuser[33] = 1'b0;
+            case (ar_m_route_type)
                 ROUTE_TO_PARENT:
                     m_axis_tuser[31:24] = cfg_parent_port;
                 ROUTE_TO_CHILD_SINGLE:
                     m_axis_tuser[31:24] = agg_ingress_1hot;
-                ROUTE_TO_CHILDREN_ALL:
+                ROUTE_TO_CHILDREN_ALL: begin
                     m_axis_tuser[31:24] = {4'b0000, cfg_child_port_mask};
-                ROUTE_TO_PARENT_AND_CHILDREN:
+                    m_axis_tuser[33] = 1'b1;
+                end
+                ROUTE_TO_PARENT_AND_CHILDREN: begin
                     m_axis_tuser[31:24] = cfg_parent_port | {4'b0000, cfg_child_port_mask};
+                    m_axis_tuser[33] = 1'b1;
+                end
                 default:
                     m_axis_tuser[31:24] = 8'h00;
             endcase
@@ -171,45 +177,12 @@ module allreduce_offload_wrapper #(
     end
 
     // ============================================================
-    // 6. ICRC 计算模块串入
+    // 6. ICRC 计算迁移到 nf_datapath_4port 中的 per_port_rewriter
+    //    wrapper 直接透传 deparser 输出
     // ============================================================
-    wire [DATA_W-1:0]  icrc_m_tdata;
-    wire [KEEP_W-1:0]  icrc_m_tkeep;
-    wire               icrc_m_tvalid;
-    wire               icrc_m_tlast;
-    wire               icrc_s_tready;
-    wire [2:0]         icrc_m_route_type;
-    wire               icrc_m_is_aggregated;
-    wire [7:0]         icrc_m_agg_ingress_port;
-
-    icrc_calc #(
-        .AXIS_DATA_WIDTH(DATA_W),
-        .AXIS_KEEP_WIDTH(KEEP_W),
-        .FIFO_DEPTH(32)
-    ) u_icrc (
-        .clk  (clk),
-        .rst_n(rst_n),
-        .s_axis_tdata            (ar_m_tdata),
-        .s_axis_tkeep            (ar_m_tkeep),
-        .s_axis_tvalid           (ar_m_tvalid),
-        .s_axis_tlast            (ar_m_tlast),
-        .s_axis_tready           (icrc_s_tready),
-        .s_axis_route_type       (ar_m_route_type),
-        .s_axis_is_aggregated    (ar_m_is_aggregated),
-        .s_axis_agg_ingress_port (ar_m_agg_ingress_port),
-        .m_axis_tdata            (icrc_m_tdata),
-        .m_axis_tkeep            (icrc_m_tkeep),
-        .m_axis_tvalid           (icrc_m_tvalid),
-        .m_axis_tlast            (icrc_m_tlast),
-        .m_axis_tready           (m_axis_tready),
-        .m_axis_route_type       (icrc_m_route_type),
-        .m_axis_is_aggregated    (icrc_m_is_aggregated),
-        .m_axis_agg_ingress_port (icrc_m_agg_ingress_port)
-    );
-
-    assign m_axis_tdata  = icrc_m_tdata;
-    assign m_axis_tkeep  = icrc_m_tkeep;
-    assign m_axis_tvalid = icrc_m_tvalid;
-    assign m_axis_tlast  = icrc_m_tlast;
+    assign m_axis_tdata  = ar_m_tdata;
+    assign m_axis_tkeep  = ar_m_tkeep;
+    assign m_axis_tvalid = ar_m_tvalid;
+    assign m_axis_tlast  = ar_m_tlast;
 
 endmodule

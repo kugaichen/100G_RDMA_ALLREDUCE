@@ -28,7 +28,7 @@ module parser #(
 
     // Hash Table
     parameter HASH_KEY_WIDTH     = 160,
-    parameter HASH_DATA_WIDTH    = 1,
+    parameter HASH_DATA_WIDTH    = 9,
 
     // HEADER / METADATA
     parameter PKT_HDR_LEN        = (2*6+4*4+3*2+1) * 8,
@@ -89,6 +89,13 @@ module parser #(
     output reg                          agg_payload_fire_en,
     input wire                          agg_ready_in,
 
+    // Minimal RoCE endpoint identity. SEND_ONLY data and incoming ACK must
+    // match these fields before entering the AllReduce protocol path.
+    input wire [47:0]                   cfg_local_mac,
+    input wire [31:0]                   cfg_local_ip,
+    input wire [15:0]                   cfg_local_udp_port,
+    input wire [23:0]                   cfg_local_qpn,
+
 
     // --- BRAM 写命令输出端口 ---
     // 这些信号将控制外部的BRAM
@@ -106,6 +113,12 @@ module parser #(
     //   若 CMAC 是 network-order 反过来  -> peer_mac[7:0]=0xAA, peer_ip[7:0]=0x0A
     output wire [7:0]                       dbg_s1_peer_mac_lsb,
     output wire [7:0]                       dbg_s1_peer_ip_lsb,
+    output wire                             dbg_s3_valid,
+    output wire                             dbg_lookup_hit,
+    output wire                             dbg_endpoint_match,
+    output wire                             dbg_send_only_match,
+    output wire [7:0]                       dbg_opcode,
+    output wire [23:0]                      dbg_qpn,
 
     // AETH 字段输出 (仅 opcode==0x11 时有效, 用于 deparser ACK 重构真值透传)
     output reg [7:0]                        agg_aeth_syndrome_out,
@@ -491,6 +504,24 @@ module parser #(
                            s3_header_buffer_holdfix[(QPN_START*8)+       23 : (QPN_START*8)+       16],
                            s3_header_buffer_holdfix[(QPN_START*8)+       31 : (QPN_START*8)+       24]};
 
+    // Wire byte 23 is IPv4 Protocol. The BTH opcode is wire byte 42.
+    // The six-field SEND_ONLY rule is kept separate from the ACK path:
+    // both share endpoint identity checks, while only opcodes 0x04 and 0x11
+    // are admitted to protocol processing.
+    wire [7:0] s3_ip_protocol = s3_header_buffer_holdfix[191:184];
+    wire [7:0] s3_opcode_wire =
+        s3_header_buffer_holdfix[(BTH_START*8) + OPCODE_WIDTH - 1 : (BTH_START*8)];
+    wire s3_endpoint_match =
+        (s3_ip_protocol == 8'h11) &&
+        (s3_peer_mac_holdfix == cfg_local_mac) &&
+        (s3_peer_ip_holdfix == cfg_local_ip) &&
+        (s3_peer_port_holdfix == cfg_local_udp_port) &&
+        (s3_qpn_host[31:24] == 8'h00) &&
+        (s3_qpn_host[23:0] == cfg_local_qpn);
+    wire s3_send_only_match = s3_endpoint_match && (s3_opcode_wire == 8'h04);
+    wire s3_ack_match       = s3_endpoint_match && (s3_opcode_wire == 8'h11);
+    wire s3_protocol_match  = s3_send_only_match || s3_ack_match;
+
     // 2. 计算取模 (用 host 视角真整数)
     assign s3_psn_mod_8b = s3_apsn_host % BUFFER_SLOTS;
 
@@ -500,6 +531,12 @@ module parser #(
     // DEBUG 引出: parser stage1 抽出的 peer_mac/peer_ip 最低字节, 用于上板确认字节序
     assign dbg_s1_peer_mac_lsb = s1_peer_mac[7:0];
     assign dbg_s1_peer_ip_lsb  = s1_peer_ip[7:0];
+    assign dbg_s3_valid         = s3_valid_holdfix;
+    assign dbg_lookup_hit       = lookup_hit_holdfix;
+    assign dbg_endpoint_match   = s3_endpoint_match;
+    assign dbg_send_only_match  = s3_send_only_match;
+    assign dbg_opcode           = s3_opcode_wire;
+    assign dbg_qpn              = s3_qpn_host[23:0];
 
     hash_connection_table #(
         .KEY_WIDTH(HASH_KEY_WIDTH),
@@ -603,7 +640,7 @@ module parser #(
                 // 语义改为"纯 payload 字节数" = UDP total - UDP header(8) - BTH(12) = UDP total - 20
                 s1_data_length <= {header_buffer_holdfix[(IP_START*8)+103 : (IP_START*8)+ 96],
                                    header_buffer_holdfix[(IP_START*8)+111 : (IP_START*8)+104]}
-                                  - 16'd20;
+                                  - 16'd24;
 
                 s1_ingress_port <= ingress_port;
                 s1_header_buffer <= header_buffer_holdfix;
@@ -705,7 +742,7 @@ module parser #(
                 s4_peer_port <= s3_peer_port_holdfix;
                 s4_ingress_port <= s3_ingress_port_holdfix;
 
-                if (lookup_hit_holdfix) begin
+                if (lookup_hit_holdfix && s3_protocol_match) begin
                     // [原代码: BTH 字段直接位段切, 得到 byte-reversed 假整数]
                     // s4_opcode <= s3_header_buffer_holdfix[(BTH_START*8) + OPCODE_WIDTH - 1 : (BTH_START*8)];
                     // s4_qpn <= s3_header_buffer_holdfix[(QPN_START*8) + QPN_LEN - 1 : (QPN_START* 8)];
@@ -718,7 +755,7 @@ module parser #(
                     s4_qpn <= s3_qpn_host;
                     s4_apsn <= s3_apsn_host;
                     s4_psn_out <= s3_apsn_host % BUFFER_SLOTS;
-                    s4_root_info <= lookup_data_holdfix;
+                    s4_root_info <= lookup_data_holdfix[8];
                     s4_aggregate_en <= 1;
 
                     // AETH 提取 (wire byte 54-57, 仅 ACK 包有效)
@@ -742,9 +779,9 @@ module parser #(
                         // 4'b0000,
                         {(12-RAM_SLOT_WIDTH){1'b0}},
                         3'b000,
-                        lookup_data_holdfix,
+                        lookup_data_holdfix[8],
                         s3_psn_mod_8b,
-                        s3_ingress_port_holdfix
+                        lookup_data_holdfix[7:0]
                     };
                     agg_payload_fire_en <= 1'b1;
                 end
@@ -1102,7 +1139,12 @@ module parser #(
                         end
                  
                         item_counter <= 0;
-                        shifter_fifo_lout <= 0;
+                        // The protocol path also carries one-beat ACK packets.
+                        // Remember tlast from the beat consumed on the
+                        // PB_IDLE -> PB_PROCESS transition; otherwise an ACK
+                        // waits for and consumes the next SEND_ONLY packet as
+                        // if it were ACK payload.
+                        shifter_fifo_lout <= fifo_lout;
                         is_first_beat <= 1'b1;
                         shifter_container <= fifo_data_out >> ORIGIN_HDR_LEN;
                         remain_in_shift_container <= AXIS_DATA_WIDTH - ORIGIN_HDR_LEN;

@@ -38,6 +38,33 @@ module nf_datapath_4port #(
     input                                     allreduce_clk,
     input                                     allreduce_rst_n,
 
+    // Optional debug control plane, normally driven by VIO in sys_clk domain.
+    // Keep cfg_update_en low to use reset defaults from allreduce_config_regs.
+    input                                     ar_cfg_update_en,
+    input  [7:0]                              ar_cfg_parent_port,
+    input  [3:0]                              ar_cfg_child_port_mask,
+    input                                     ar_cfg_is_root,
+    input  [47:0]                             ar_cfg_fpga_mac,
+    input  [31:0]                             ar_cfg_fpga_ip,
+    input  [23:0]                             ar_cfg_fpga_qp,
+    input  [15:0]                             ar_cfg_fpga_udp_port,
+    input  [47:0]                             ar_cfg_worker0_mac,
+    input  [31:0]                             ar_cfg_worker0_ip,
+    input  [23:0]                             ar_cfg_worker0_qp,
+    input  [15:0]                             ar_cfg_worker0_udp_port,
+    input  [47:0]                             ar_cfg_worker1_mac,
+    input  [31:0]                             ar_cfg_worker1_ip,
+    input  [23:0]                             ar_cfg_worker1_qp,
+    input  [15:0]                             ar_cfg_worker1_udp_port,
+    input  [47:0]                             ar_cfg_worker2_mac,
+    input  [31:0]                             ar_cfg_worker2_ip,
+    input  [23:0]                             ar_cfg_worker2_qp,
+    input  [15:0]                             ar_cfg_worker2_udp_port,
+    input  [47:0]                             ar_cfg_worker3_mac,
+    input  [31:0]                             ar_cfg_worker3_ip,
+    input  [23:0]                             ar_cfg_worker3_qp,
+    input  [15:0]                             ar_cfg_worker3_udp_port,
+
     // ---------------- AXI-Lite slave 0 (input arbiter) ----------------
     input  [C_S_AXI_ADDR_WIDTH-1 : 0]         S0_AXI_AWADDR,
     input                                     S0_AXI_AWVALID,
@@ -172,6 +199,150 @@ module nf_datapath_4port #(
     wire                                  allreduce_to_opl_tready;
     wire                                  allreduce_to_opl_tlast;
 
+    wire [7:0]  ar_cfg_parent_port_sync;
+    wire [3:0]  ar_cfg_child_port_mask_sync;
+    wire        ar_cfg_is_root_sync;
+    wire [47:0] ar_cfg_fpga_mac_sync;
+    wire [31:0] ar_cfg_fpga_ip_sync;
+    wire [23:0] ar_cfg_fpga_qp_sync;
+    wire [15:0] ar_cfg_fpga_udp_port_sync;
+    wire [47:0] ar_cfg_worker0_mac_sync;
+    wire [31:0] ar_cfg_worker0_ip_sync;
+    wire [23:0] ar_cfg_worker0_qp_sync;
+    wire [15:0] ar_cfg_worker0_udp_port_sync;
+    wire [47:0] ar_cfg_worker1_mac_sync;
+    wire [31:0] ar_cfg_worker1_ip_sync;
+    wire [23:0] ar_cfg_worker1_qp_sync;
+    wire [15:0] ar_cfg_worker1_udp_port_sync;
+
+    wire [7:0]  cfg_parent_port;
+    wire [3:0]  cfg_child_port_mask;
+    wire        cfg_is_root;
+    wire [47:0] cfg_fpga_mac;
+    wire [31:0] cfg_fpga_ip;
+    wire [23:0] cfg_fpga_qp;
+    wire [15:0] cfg_fpga_udp_port;
+    wire [47:0] cfg_worker0_mac;
+    wire [31:0] cfg_worker0_ip;
+    wire [23:0] cfg_worker0_qp;
+    wire [15:0] cfg_worker0_udp_port;
+    wire [47:0] cfg_worker1_mac;
+    wire [31:0] cfg_worker1_ip;
+    wire [23:0] cfg_worker1_qp;
+    wire [15:0] cfg_worker1_udp_port;
+    wire [47:0] cfg_worker2_mac;
+    wire [31:0] cfg_worker2_ip;
+    wire [23:0] cfg_worker2_qp;
+    wire [15:0] cfg_worker2_udp_port;
+    wire [47:0] cfg_worker3_mac;
+    wire [31:0] cfg_worker3_ip;
+    wire [23:0] cfg_worker3_qp;
+    wire [15:0] cfg_worker3_udp_port;
+
+    allreduce_config_regs u_allreduce_config_regs_axis (
+        .clk                       (axis_aclk),
+        .rst_n                     (axis_resetn),
+        .cfg_update_en             (ar_cfg_update_en),
+        .cfg_parent_port_in        (ar_cfg_parent_port),
+        .cfg_child_port_mask_in    (ar_cfg_child_port_mask),
+        .cfg_is_root_in            (ar_cfg_is_root),
+        .cfg_fpga_mac_in           (ar_cfg_fpga_mac),
+        .cfg_fpga_ip_in            (ar_cfg_fpga_ip),
+        .cfg_fpga_qp_in            (ar_cfg_fpga_qp),
+        .cfg_fpga_udp_port_in      (ar_cfg_fpga_udp_port),
+        .cfg_worker0_mac_in        (ar_cfg_worker0_mac),
+        .cfg_worker0_ip_in         (ar_cfg_worker0_ip),
+        .cfg_worker0_qp_in         (ar_cfg_worker0_qp),
+        .cfg_worker0_udp_port_in   (ar_cfg_worker0_udp_port),
+        .cfg_worker1_mac_in        (ar_cfg_worker1_mac),
+        .cfg_worker1_ip_in         (ar_cfg_worker1_ip),
+        .cfg_worker1_qp_in         (ar_cfg_worker1_qp),
+        .cfg_worker1_udp_port_in   (ar_cfg_worker1_udp_port),
+        .cfg_worker2_mac_in        (ar_cfg_worker2_mac),
+        .cfg_worker2_ip_in         (ar_cfg_worker2_ip),
+        .cfg_worker2_qp_in         (ar_cfg_worker2_qp),
+        .cfg_worker2_udp_port_in   (ar_cfg_worker2_udp_port),
+        .cfg_worker3_mac_in        (ar_cfg_worker3_mac),
+        .cfg_worker3_ip_in         (ar_cfg_worker3_ip),
+        .cfg_worker3_qp_in         (ar_cfg_worker3_qp),
+        .cfg_worker3_udp_port_in   (ar_cfg_worker3_udp_port),
+        .cfg_parent_port           (cfg_parent_port),
+        .cfg_child_port_mask       (cfg_child_port_mask),
+        .cfg_is_root               (cfg_is_root),
+        .cfg_fpga_mac              (cfg_fpga_mac),
+        .cfg_fpga_ip               (cfg_fpga_ip),
+        .cfg_fpga_qp               (cfg_fpga_qp),
+        .cfg_fpga_udp_port         (cfg_fpga_udp_port),
+        .cfg_worker0_mac           (cfg_worker0_mac),
+        .cfg_worker0_ip            (cfg_worker0_ip),
+        .cfg_worker0_qp            (cfg_worker0_qp),
+        .cfg_worker0_udp_port      (cfg_worker0_udp_port),
+        .cfg_worker1_mac           (cfg_worker1_mac),
+        .cfg_worker1_ip            (cfg_worker1_ip),
+        .cfg_worker1_qp            (cfg_worker1_qp),
+        .cfg_worker1_udp_port      (cfg_worker1_udp_port),
+        .cfg_worker2_mac           (cfg_worker2_mac),
+        .cfg_worker2_ip            (cfg_worker2_ip),
+        .cfg_worker2_qp            (cfg_worker2_qp),
+        .cfg_worker2_udp_port      (cfg_worker2_udp_port),
+        .cfg_worker3_mac           (cfg_worker3_mac),
+        .cfg_worker3_ip            (cfg_worker3_ip),
+        .cfg_worker3_qp            (cfg_worker3_qp),
+        .cfg_worker3_udp_port      (cfg_worker3_udp_port)
+    );
+
+    allreduce_config_regs u_allreduce_config_regs_ar (
+        .clk                       (allreduce_clk),
+        .rst_n                     (allreduce_rst_n),
+        .cfg_update_en             (ar_cfg_update_en),
+        .cfg_parent_port_in        (ar_cfg_parent_port),
+        .cfg_child_port_mask_in    (ar_cfg_child_port_mask),
+        .cfg_is_root_in            (ar_cfg_is_root),
+        .cfg_fpga_mac_in           (ar_cfg_fpga_mac),
+        .cfg_fpga_ip_in            (ar_cfg_fpga_ip),
+        .cfg_fpga_qp_in            (ar_cfg_fpga_qp),
+        .cfg_fpga_udp_port_in      (ar_cfg_fpga_udp_port),
+        .cfg_worker0_mac_in        (ar_cfg_worker0_mac),
+        .cfg_worker0_ip_in         (ar_cfg_worker0_ip),
+        .cfg_worker0_qp_in         (ar_cfg_worker0_qp),
+        .cfg_worker0_udp_port_in   (ar_cfg_worker0_udp_port),
+        .cfg_worker1_mac_in        (ar_cfg_worker1_mac),
+        .cfg_worker1_ip_in         (ar_cfg_worker1_ip),
+        .cfg_worker1_qp_in         (ar_cfg_worker1_qp),
+        .cfg_worker1_udp_port_in   (ar_cfg_worker1_udp_port),
+        .cfg_worker2_mac_in        (ar_cfg_worker2_mac),
+        .cfg_worker2_ip_in         (ar_cfg_worker2_ip),
+        .cfg_worker2_qp_in         (ar_cfg_worker2_qp),
+        .cfg_worker2_udp_port_in   (ar_cfg_worker2_udp_port),
+        .cfg_worker3_mac_in        (ar_cfg_worker3_mac),
+        .cfg_worker3_ip_in         (ar_cfg_worker3_ip),
+        .cfg_worker3_qp_in         (ar_cfg_worker3_qp),
+        .cfg_worker3_udp_port_in   (ar_cfg_worker3_udp_port),
+        .cfg_parent_port           (ar_cfg_parent_port_sync),
+        .cfg_child_port_mask       (ar_cfg_child_port_mask_sync),
+        .cfg_is_root               (ar_cfg_is_root_sync),
+        .cfg_fpga_mac              (ar_cfg_fpga_mac_sync),
+        .cfg_fpga_ip               (ar_cfg_fpga_ip_sync),
+        .cfg_fpga_qp               (ar_cfg_fpga_qp_sync),
+        .cfg_fpga_udp_port         (ar_cfg_fpga_udp_port_sync),
+        .cfg_worker0_mac           (ar_cfg_worker0_mac_sync),
+        .cfg_worker0_ip            (ar_cfg_worker0_ip_sync),
+        .cfg_worker0_qp            (ar_cfg_worker0_qp_sync),
+        .cfg_worker0_udp_port      (ar_cfg_worker0_udp_port_sync),
+        .cfg_worker1_mac           (ar_cfg_worker1_mac_sync),
+        .cfg_worker1_ip            (ar_cfg_worker1_ip_sync),
+        .cfg_worker1_qp            (ar_cfg_worker1_qp_sync),
+        .cfg_worker1_udp_port      (ar_cfg_worker1_udp_port_sync),
+        .cfg_worker2_mac           (),
+        .cfg_worker2_ip            (),
+        .cfg_worker2_qp            (),
+        .cfg_worker2_udp_port      (),
+        .cfg_worker3_mac           (),
+        .cfg_worker3_ip            (),
+        .cfg_worker3_qp            (),
+        .cfg_worker3_udp_port      ()
+    );
+
     wire [C_M_AXIS_DATA_WIDTH-1:0]        m_axis_opl_tdata;
     wire [(C_M_AXIS_DATA_WIDTH/8)-1:0]    m_axis_opl_tkeep;
     wire [C_M_AXIS_TUSER_WIDTH-1:0]       m_axis_opl_tuser;
@@ -252,7 +423,7 @@ module nf_datapath_4port #(
     );
 
     // ============================================================
-    // CDC FIFO: input_arbiter (322MHz) → allreduce_wrapper (250MHz)
+    // CDC FIFO: input_arbiter (322MHz) 鈫?allreduce_wrapper (250MHz)
     // ============================================================
     localparam CDC_WIDTH = C_M_AXIS_DATA_WIDTH + C_M_AXIS_DATA_WIDTH/8 + C_M_AXIS_TUSER_WIDTH + 1;
 
@@ -323,27 +494,27 @@ module nf_datapath_4port #(
         .clk    (allreduce_clk),
         .rst_n  (allreduce_rst_n),
 
-        .cfg_parent_port    (8'h04),
-        .cfg_child_port_mask(4'b0011),
-        .cfg_is_root        (1'b1),
+        .cfg_parent_port    (ar_cfg_parent_port_sync),
+        .cfg_child_port_mask(ar_cfg_child_port_mask_sync),
+        .cfg_is_root        (ar_cfg_is_root_sync),
 
-        // Per-port identity LUT (P0=worker0, P1=worker1)
-        .cfg_my_mac_p0      (48'h10_70_fd_19_00_95),
-        .cfg_my_mac_p1      (48'h10_70_fd_19_00_95),
-        .cfg_my_ip_p0       (32'hC0_A8_01_02),
-        .cfg_my_ip_p1       (32'hC0_A8_01_01),
-        .cfg_my_qp_p0       (24'd8761),
-        .cfg_my_qp_p1       (24'd28406),
-        .cfg_my_port_p0     (16'd4791),
-        .cfg_my_port_p1     (16'd4791),
-        .cfg_peer_mac_p0    (48'h52_54_00_a0_e6_9a),
-        .cfg_peer_mac_p1    (48'h52_54_00_07_1b_5b),
-        .cfg_peer_ip_p0     (32'hC0_A8_01_01),
-        .cfg_peer_ip_p1     (32'hC0_A8_01_02),
-        .cfg_peer_qp_p0     (24'd28406),
-        .cfg_peer_qp_p1     (24'd8761),
-        .cfg_peer_port_p0   (16'd4791),
-        .cfg_peer_port_p1   (16'd4791),
+        // Per-port identity LUT (瀹為獙闃舵: P0==P1, 涓や釜 worker 閰嶇疆鐩稿悓)
+        .cfg_my_mac_p0      (ar_cfg_fpga_mac_sync),
+        .cfg_my_mac_p1      (ar_cfg_fpga_mac_sync),
+        .cfg_my_ip_p0       (ar_cfg_fpga_ip_sync),
+        .cfg_my_ip_p1       (ar_cfg_fpga_ip_sync),
+        .cfg_my_qp_p0       (ar_cfg_fpga_qp_sync),
+        .cfg_my_qp_p1       (ar_cfg_fpga_qp_sync),
+        .cfg_my_port_p0     (ar_cfg_fpga_udp_port_sync),
+        .cfg_my_port_p1     (ar_cfg_fpga_udp_port_sync),
+        .cfg_peer_mac_p0    (ar_cfg_worker0_mac_sync),
+        .cfg_peer_mac_p1    (ar_cfg_worker1_mac_sync),
+        .cfg_peer_ip_p0     (ar_cfg_worker0_ip_sync),
+        .cfg_peer_ip_p1     (ar_cfg_worker1_ip_sync),
+        .cfg_peer_qp_p0     (ar_cfg_worker0_qp_sync),    // Worker1 QPN
+        .cfg_peer_qp_p1     (ar_cfg_worker1_qp_sync),     // Worker2 QPN
+        .cfg_peer_port_p0   (ar_cfg_worker0_udp_port_sync),
+        .cfg_peer_port_p1   (ar_cfg_worker1_udp_port_sync),
 
         .s_axis_tdata   (ar_s_tdata),
         .s_axis_tkeep   (ar_s_tkeep),
@@ -361,7 +532,7 @@ module nf_datapath_4port #(
     );
 
     // ============================================================
-    // CDC FIFO: allreduce_wrapper (250MHz) → OPL (322MHz)
+    // CDC FIFO: allreduce_wrapper (250MHz) 鈫?OPL (322MHz)
     // ============================================================
     wire                                  cdc_out_full;
     wire                                  cdc_out_empty;
@@ -460,8 +631,23 @@ module nf_datapath_4port #(
     );
 
     // ============================================================
-    // output_queues (N=4)
+    // output_queues (N=4)  鈫? per_port_rewriter (脳4)  鈫? 100G TX
+    // output_queues 鐨勮緭鍑哄厛鎺ュ埌涓棿 wire (oq_m_axis_*), 鍐嶇粡杩?
+    // 姣忎釜绔彛鐙珛鐨?per_port_rewriter 鏀瑰啓 header 鍚庨€佺粰 100G TX
     // ============================================================
+    wire [C_M_AXIS_DATA_WIDTH-1:0]      oq_m_axis_0_tdata,  oq_m_axis_1_tdata,
+                                        oq_m_axis_2_tdata,  oq_m_axis_3_tdata;
+    wire [C_M_AXIS_DATA_WIDTH/8-1:0]    oq_m_axis_0_tkeep,  oq_m_axis_1_tkeep,
+                                        oq_m_axis_2_tkeep,  oq_m_axis_3_tkeep;
+    wire [C_M_AXIS_TUSER_WIDTH-1:0]     oq_m_axis_0_tuser,  oq_m_axis_1_tuser,
+                                        oq_m_axis_2_tuser,  oq_m_axis_3_tuser;
+    wire                                oq_m_axis_0_tvalid, oq_m_axis_1_tvalid,
+                                        oq_m_axis_2_tvalid, oq_m_axis_3_tvalid;
+    wire                                oq_m_axis_0_tready, oq_m_axis_1_tready,
+                                        oq_m_axis_2_tready, oq_m_axis_3_tready;
+    wire                                oq_m_axis_0_tlast,  oq_m_axis_1_tlast,
+                                        oq_m_axis_2_tlast,  oq_m_axis_3_tlast;
+
     output_queues #(
         .C_M_AXIS_DATA_WIDTH (C_M_AXIS_DATA_WIDTH),
         .C_S_AXIS_DATA_WIDTH (C_S_AXIS_DATA_WIDTH),
@@ -482,33 +668,33 @@ module nf_datapath_4port #(
         .s_axis_tready  (m_axis_opl_tready),
         .s_axis_tlast   (m_axis_opl_tlast),
 
-        .m_axis_0_tdata (m_axis_0_tdata),
-        .m_axis_0_tkeep (m_axis_0_tkeep),
-        .m_axis_0_tuser (m_axis_0_tuser),
-        .m_axis_0_tvalid(m_axis_0_tvalid),
-        .m_axis_0_tready(m_axis_0_tready),
-        .m_axis_0_tlast (m_axis_0_tlast),
+        .m_axis_0_tdata (oq_m_axis_0_tdata),
+        .m_axis_0_tkeep (oq_m_axis_0_tkeep),
+        .m_axis_0_tuser (oq_m_axis_0_tuser),
+        .m_axis_0_tvalid(oq_m_axis_0_tvalid),
+        .m_axis_0_tready(oq_m_axis_0_tready),
+        .m_axis_0_tlast (oq_m_axis_0_tlast),
 
-        .m_axis_1_tdata (m_axis_1_tdata),
-        .m_axis_1_tkeep (m_axis_1_tkeep),
-        .m_axis_1_tuser (m_axis_1_tuser),
-        .m_axis_1_tvalid(m_axis_1_tvalid),
-        .m_axis_1_tready(m_axis_1_tready),
-        .m_axis_1_tlast (m_axis_1_tlast),
+        .m_axis_1_tdata (oq_m_axis_1_tdata),
+        .m_axis_1_tkeep (oq_m_axis_1_tkeep),
+        .m_axis_1_tuser (oq_m_axis_1_tuser),
+        .m_axis_1_tvalid(oq_m_axis_1_tvalid),
+        .m_axis_1_tready(oq_m_axis_1_tready),
+        .m_axis_1_tlast (oq_m_axis_1_tlast),
 
-        .m_axis_2_tdata (m_axis_2_tdata),
-        .m_axis_2_tkeep (m_axis_2_tkeep),
-        .m_axis_2_tuser (m_axis_2_tuser),
-        .m_axis_2_tvalid(m_axis_2_tvalid),
-        .m_axis_2_tready(m_axis_2_tready),
-        .m_axis_2_tlast (m_axis_2_tlast),
+        .m_axis_2_tdata (oq_m_axis_2_tdata),
+        .m_axis_2_tkeep (oq_m_axis_2_tkeep),
+        .m_axis_2_tuser (oq_m_axis_2_tuser),
+        .m_axis_2_tvalid(oq_m_axis_2_tvalid),
+        .m_axis_2_tready(oq_m_axis_2_tready),
+        .m_axis_2_tlast (oq_m_axis_2_tlast),
 
-        .m_axis_3_tdata (m_axis_3_tdata),
-        .m_axis_3_tkeep (m_axis_3_tkeep),
-        .m_axis_3_tuser (m_axis_3_tuser),
-        .m_axis_3_tvalid(m_axis_3_tvalid),
-        .m_axis_3_tready(m_axis_3_tready),
-        .m_axis_3_tlast (m_axis_3_tlast),
+        .m_axis_3_tdata (oq_m_axis_3_tdata),
+        .m_axis_3_tkeep (oq_m_axis_3_tkeep),
+        .m_axis_3_tuser (oq_m_axis_3_tuser),
+        .m_axis_3_tvalid(oq_m_axis_3_tvalid),
+        .m_axis_3_tready(oq_m_axis_3_tready),
+        .m_axis_3_tlast (oq_m_axis_3_tlast),
 
         .bytes_stored    (),
         .pkt_stored      (),
@@ -542,6 +728,140 @@ module nf_datapath_4port #(
         .S_AXI_BRESP   (S2_AXI_BRESP),
         .S_AXI_BVALID  (S2_AXI_BVALID),
         .S_AXI_AWREADY (S2_AXI_AWREADY)
+    );
+
+    // ============================================================
+    // per_port_rewriter (脳4): 姣忕鍙ｇ嫭绔?header 鏇挎崲
+    // child_port_mask = 4'b0011 鈫?CHILD_PORT_MASK = 8'h03
+    // (娉? tuser[31:24]=0x07 = 0b0111 鈫?P0+P1+P2 閮芥敹鍒板箍鎾寘,
+    //  P2 鏄洃鎺х鍙? 鐢ㄤ簬 wireshark 鎶撳寘)
+    //
+    // P0 鈫?Worker1: b8:59:9f:01:11:22, 192.168.3.5
+    // P1 鈫?Worker2: b8:59:9f:01:12:58, 192.168.3.6
+    // P2 鈫?Worker4 (鐩戞帶): b8:59:9f:01:12:26, 192.168.3.8
+    // P3 鈫?鏃犳祦閲?(PCIe 渚涚數)
+    // FPGA 韬唤: MAC = 02:00:00:00:03:07, IP = 192.168.3.7
+    // ============================================================
+    per_port_rewriter #(
+        .AXIS_DATA_WIDTH (C_M_AXIS_DATA_WIDTH),
+        .AXIS_KEEP_WIDTH (C_M_AXIS_DATA_WIDTH/8),
+        .AXIS_TUSER_WIDTH(C_M_AXIS_TUSER_WIDTH),
+        .LOCAL_PORT_ONEHOT(8'h01)
+    ) u_rwr_p0 (
+        .clk         (axis_aclk),
+        .rst_n       (axis_resetn),
+        .cfg_child_port_mask({4'b0000, cfg_child_port_mask}),
+        .cfg_dst_mac (cfg_worker0_mac),  // Worker1 MAC
+        .cfg_src_mac (cfg_fpga_mac),
+        .cfg_dst_ip  (cfg_worker0_ip),
+        .cfg_src_ip  (cfg_fpga_ip),
+        .cfg_dst_qp  (cfg_worker0_qp),                // Worker1 QPN (涓?wrapper.cfg_peer_qp_p0 淇濇寔涓€鑷?
+        .cfg_src_port(cfg_fpga_udp_port),
+        .cfg_dst_port(cfg_worker0_udp_port),
+        .s_axis_tdata (oq_m_axis_0_tdata),
+        .s_axis_tkeep (oq_m_axis_0_tkeep),
+        .s_axis_tuser (oq_m_axis_0_tuser),
+        .s_axis_tvalid(oq_m_axis_0_tvalid),
+        .s_axis_tlast (oq_m_axis_0_tlast),
+        .s_axis_tready(oq_m_axis_0_tready),
+        .m_axis_tdata (m_axis_0_tdata),
+        .m_axis_tkeep (m_axis_0_tkeep),
+        .m_axis_tuser (m_axis_0_tuser),
+        .m_axis_tvalid(m_axis_0_tvalid),
+        .m_axis_tlast (m_axis_0_tlast),
+        .m_axis_tready(m_axis_0_tready)
+    );
+
+    per_port_rewriter #(
+        .AXIS_DATA_WIDTH (C_M_AXIS_DATA_WIDTH),
+        .AXIS_KEEP_WIDTH (C_M_AXIS_DATA_WIDTH/8),
+        .AXIS_TUSER_WIDTH(C_M_AXIS_TUSER_WIDTH),
+        .LOCAL_PORT_ONEHOT(8'h02)
+    ) u_rwr_p1 (
+        .clk         (axis_aclk),
+        .rst_n       (axis_resetn),
+        .cfg_child_port_mask({4'b0000, cfg_child_port_mask}),
+        .cfg_dst_mac (cfg_worker1_mac),  // Worker2 MAC
+        .cfg_src_mac (cfg_fpga_mac),
+        .cfg_dst_ip  (cfg_worker1_ip),
+        .cfg_src_ip  (cfg_fpga_ip),
+        .cfg_dst_qp  (cfg_worker1_qp),                 // Worker2 QPN (涓?wrapper.cfg_peer_qp_p1 淇濇寔涓€鑷?
+        .cfg_src_port(cfg_fpga_udp_port),
+        .cfg_dst_port(cfg_worker1_udp_port),
+        .s_axis_tdata (oq_m_axis_1_tdata),
+        .s_axis_tkeep (oq_m_axis_1_tkeep),
+        .s_axis_tuser (oq_m_axis_1_tuser),
+        .s_axis_tvalid(oq_m_axis_1_tvalid),
+        .s_axis_tlast (oq_m_axis_1_tlast),
+        .s_axis_tready(oq_m_axis_1_tready),
+        .m_axis_tdata (m_axis_1_tdata),
+        .m_axis_tkeep (m_axis_1_tkeep),
+        .m_axis_tuser (m_axis_1_tuser),
+        .m_axis_tvalid(m_axis_1_tvalid),
+        .m_axis_tlast (m_axis_1_tlast),
+        .m_axis_tready(m_axis_1_tready)
+    );
+
+    // P2: 鐩戞帶绔彛, Worker4 (b8:59:9f:01:12:26, 192.168.3.8)
+    per_port_rewriter #(
+        .AXIS_DATA_WIDTH (C_M_AXIS_DATA_WIDTH),
+        .AXIS_KEEP_WIDTH (C_M_AXIS_DATA_WIDTH/8),
+        .AXIS_TUSER_WIDTH(C_M_AXIS_TUSER_WIDTH),
+        .LOCAL_PORT_ONEHOT(8'h04)
+    ) u_rwr_p2 (
+        .clk         (axis_aclk),
+        .rst_n       (axis_resetn),
+        .cfg_child_port_mask({4'b0000, cfg_child_port_mask}),
+        .cfg_dst_mac (cfg_worker2_mac),  // Worker4 (鐩戞帶) MAC
+        .cfg_src_mac (cfg_fpga_mac),
+        .cfg_dst_ip  (cfg_worker2_ip),
+        .cfg_src_ip  (cfg_fpga_ip),
+        .cfg_dst_qp  (cfg_worker2_qp),                // 鐩戞帶鐢? 浠绘剰鍊?
+        .cfg_src_port(cfg_fpga_udp_port),
+        .cfg_dst_port(cfg_worker2_udp_port),
+        .s_axis_tdata (oq_m_axis_2_tdata),
+        .s_axis_tkeep (oq_m_axis_2_tkeep),
+        .s_axis_tuser (oq_m_axis_2_tuser),
+        .s_axis_tvalid(oq_m_axis_2_tvalid),
+        .s_axis_tlast (oq_m_axis_2_tlast),
+        .s_axis_tready(oq_m_axis_2_tready),
+        .m_axis_tdata (m_axis_2_tdata),
+        .m_axis_tkeep (m_axis_2_tkeep),
+        .m_axis_tuser (m_axis_2_tuser),
+        .m_axis_tvalid(m_axis_2_tvalid),
+        .m_axis_tlast (m_axis_2_tlast),
+        .m_axis_tready(m_axis_2_tready)
+    );
+
+    // P3: 鏃犳祦閲? LUT 浠绘剰 (PCIe 渚涚數, 涓嶈繛 worker)
+    per_port_rewriter #(
+        .AXIS_DATA_WIDTH (C_M_AXIS_DATA_WIDTH),
+        .AXIS_KEEP_WIDTH (C_M_AXIS_DATA_WIDTH/8),
+        .AXIS_TUSER_WIDTH(C_M_AXIS_TUSER_WIDTH),
+        .LOCAL_PORT_ONEHOT(8'h08)
+    ) u_rwr_p3 (
+        .clk         (axis_aclk),
+        .rst_n       (axis_resetn),
+        .cfg_child_port_mask({4'b0000, cfg_child_port_mask}),
+        .cfg_dst_mac (cfg_worker3_mac),
+        .cfg_src_mac (cfg_fpga_mac),
+        .cfg_dst_ip  (cfg_worker3_ip),
+        .cfg_src_ip  (cfg_fpga_ip),
+        .cfg_dst_qp  (cfg_worker3_qp),                // P3 鏃犳祦閲? 浠绘剰鍊?
+        .cfg_src_port(cfg_fpga_udp_port),
+        .cfg_dst_port(cfg_worker3_udp_port),
+        .s_axis_tdata (oq_m_axis_3_tdata),
+        .s_axis_tkeep (oq_m_axis_3_tkeep),
+        .s_axis_tuser (oq_m_axis_3_tuser),
+        .s_axis_tvalid(oq_m_axis_3_tvalid),
+        .s_axis_tlast (oq_m_axis_3_tlast),
+        .s_axis_tready(oq_m_axis_3_tready),
+        .m_axis_tdata (m_axis_3_tdata),
+        .m_axis_tkeep (m_axis_3_tkeep),
+        .m_axis_tuser (m_axis_3_tuser),
+        .m_axis_tvalid(m_axis_3_tvalid),
+        .m_axis_tlast (m_axis_3_tlast),
+        .m_axis_tready(m_axis_3_tready)
     );
 
 endmodule

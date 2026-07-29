@@ -156,8 +156,6 @@ module deparser#(
     localparam PASS_THROUGH     = 3'd1;
     localparam GEN_HEADER       = 3'd2;
     localparam GEN_PAYLOAD      = 3'd3;
-    localparam GEN_HEADER_P1    = 3'd4;  // 广播第二份包 header (P1 LUT)
-    localparam GEN_PAYLOAD_P1   = 3'd5;  // 广播第二份包 payload
 
     localparam ROUTE_PASSTHROUGH            = 3'd0;
     localparam ROUTE_TO_PARENT              = 3'd1;
@@ -331,17 +329,29 @@ module deparser#(
     // =================================================================
     // 1b. 广播路径 LUT 选择 (ACK 路径保持换位不变)
     // =================================================================
-    reg port_sel;  // 0=P0, 1=P1; 广播第二份时置1
-    wire is_broadcast = (latched_route_type == ROUTE_TO_CHILDREN_ALL);
+    wire is_broadcast = (latched_route_type == ROUTE_TO_CHILDREN_ALL) ||
+                        (latched_route_type == ROUTE_TO_PARENT_AND_CHILDREN);
     wire use_lut = latched_is_data_pkt && is_broadcast;
 
-    wire [47:0] sel_dst_mac  = use_lut ? (port_sel ? cfg_peer_mac_p1  : cfg_peer_mac_p0)  : h_peer_mac;
-    wire [47:0] sel_src_mac  = use_lut ? (port_sel ? cfg_my_mac_p1    : cfg_my_mac_p0)    : h_src_mac;
-    wire [31:0] sel_dst_ip   = use_lut ? (port_sel ? cfg_peer_ip_p1   : cfg_peer_ip_p0)   : h_peer_ip;
-    wire [31:0] sel_src_ip   = use_lut ? (port_sel ? cfg_my_ip_p1     : cfg_my_ip_p0)     : h_src_ip;
-    wire [23:0] sel_dst_qp   = use_lut ? (port_sel ? cfg_peer_qp_p1   : cfg_peer_qp_p0)   : h_qpn[23:0];
-    wire [15:0] sel_src_port = use_lut ? (port_sel ? cfg_my_port_p1   : cfg_my_port_p0)   : h_src_port;
-    wire [15:0] sel_dst_port = use_lut ? (port_sel ? cfg_peer_port_p1 : cfg_peer_port_p0) : h_peer_port;
+    // ACK 路径单播回 ingress_port: 按 ingress_port 选 P0/P1 LUT 的 worker QPN
+    // (RoCEv2 BTH 没有 src_QPN, 入包只携带 dst_QPN=FPGA QPN,
+    //  ACK 出包的 dst_QPN=worker QPN, 必须从 LUT 获取)
+    wire [23:0] ack_dst_qp = (latched_agg_ingress == 8'd0) ? cfg_peer_qp_p0 : cfg_peer_qp_p1;
+
+    // 字段换位: 出包 dst = 入包 src, 出包 src = 入包 dst
+    // (parser 命名: peer = 入包 dst, src = 入包 src)
+    // 广播包字段在 per_port_rewriter 中按本端口 LUT 替换, 此处占位用换位值即可
+    // ACK 包字段必须在此正确填入 (per_port_rewriter 透传不改 ACK)
+    wire [47:0] sel_dst_mac  = h_src_mac;
+    wire [47:0] sel_src_mac  = h_peer_mac;
+    wire [31:0] sel_dst_ip   = h_src_ip;
+    wire [31:0] sel_src_ip   = h_peer_ip;
+    wire [23:0] sel_dst_qp   = use_lut ? h_qpn[23:0]  : ack_dst_qp;
+    wire [15:0] sel_src_port = h_peer_port;
+    // RoCEv2 always uses UDP destination port 4791.  The incoming ACK source
+    // port is an RNIC-selected entropy value and must not become the reflected
+    // ACK destination port.
+    wire [15:0] sel_dst_port = latched_is_ack_pkt ? h_peer_port : h_src_port;
 
     // =================================================================
     // 2.Length Calculation
@@ -641,10 +651,10 @@ module deparser#(
         constructed_header[359:352] = 8'hFF;                 // byte 44: pkey MSB (0xFFFF)
         constructed_header[367:360] = 8'hFF;                 // byte 45: pkey LSB
         // QPN: wire byte 46~49 (广播用 LUT, ACK 用换位)
-        constructed_header[375:368] = use_lut ? 8'h00            : h_qpn[31:24];
-        constructed_header[383:376] = use_lut ? sel_dst_qp[23:16]: h_qpn[23:16];
-        constructed_header[391:384] = use_lut ? sel_dst_qp[15: 8]: h_qpn[15: 8];
-        constructed_header[399:392] = use_lut ? sel_dst_qp[ 7: 0]: h_qpn[ 7: 0];
+        constructed_header[375:368] = 8'h00;                  // QPN 高字节 reserved
+        constructed_header[383:376] = sel_dst_qp[23:16];
+        constructed_header[391:384] = sel_dst_qp[15: 8];
+        constructed_header[399:392] = sel_dst_qp[ 7: 0];
         // APSN (含 AckReq bit): wire byte 50~53
         constructed_header[407:400] = target_psn[31:24];
         constructed_header[415:408] = target_psn[23:16];
@@ -713,18 +723,6 @@ module deparser#(
 
             GEN_PAYLOAD: begin
                 if (m_axis_tready && payload_beat_count == (PAYLOAD_ITEM_NUM - 1)) begin
-                    next_state = is_broadcast ? GEN_HEADER_P1 : IDLE;
-                end
-            end
-
-            GEN_HEADER_P1: begin
-                if (m_axis_tready) begin
-                    next_state = has_payload ? GEN_PAYLOAD_P1 : IDLE;
-                end
-            end
-
-            GEN_PAYLOAD_P1: begin
-                if (m_axis_tready && payload_beat_count == (PAYLOAD_ITEM_NUM - 1)) begin
                     next_state = IDLE;
                 end
             end
@@ -742,7 +740,6 @@ module deparser#(
             in_agg_ready <= 0;
             payload_beat_count <= 0;
             has_payload <= 0;
-            port_sel <= 1'b0;
             m_axis_route_type <= ROUTE_PASSTHROUGH;
             m_axis_is_aggregated <= 1'b0;
             m_axis_agg_ingress_port <= 8'd0;
@@ -767,7 +764,6 @@ module deparser#(
                     if (agg_req_valid) begin
                         has_payload <= is_data_pkt;
                         payload_beat_count <= 0;
-                        port_sel <= 1'b0;
                         in_agg_ready <= 1'b0;
                     end
 
@@ -797,14 +793,23 @@ module deparser#(
                 GEN_HEADER: begin
                     m_axis_tvalid <= 1'b1;
                     m_axis_tdata <= constructed_header;
-                    m_axis_tkeep <= {AXIS_KEEP_WIDTH{1'b1}};
+                    // ACK has no payload beat: Ethernet(14) + IPv4(20) +
+                    // UDP(8) + BTH(12) + AETH(4) + ICRC(4) = 62 bytes.
+                    m_axis_tkeep <= has_payload
+                                  ? {AXIS_KEEP_WIDTH{1'b1}}
+                                  : {{(AXIS_KEEP_WIDTH-62){1'b0}},
+                                     {62{1'b1}}};
 
                     m_axis_tlast <= has_payload ? 1'b0 : 1'b1;
 
                     m_axis_is_aggregated <= 1'b1;
-                    // 广播路径: 串行单播, 第一份发 P0
-                    m_axis_route_type       <= is_broadcast ? ROUTE_TO_CHILD_SINGLE : latched_route_type;
-                    m_axis_agg_ingress_port <= is_broadcast ? 8'd0 : latched_agg_ingress;
+                    m_axis_route_type <= latched_route_type;
+                    m_axis_agg_ingress_port <= latched_agg_ingress;
+
+                    // ACK is a single-beat packet.  Once that beat is
+                    // accepted, consume the upstream request exactly once.
+                    if (m_axis_tready && !has_payload)
+                        in_agg_ready <= 1'b1;
                 end
 
                 GEN_PAYLOAD: begin
@@ -834,63 +839,8 @@ module deparser#(
                     m_axis_tlast <= payload_last_beat;
 
                     m_axis_is_aggregated <= 1'b1;
-                    m_axis_route_type       <= is_broadcast ? ROUTE_TO_CHILD_SINGLE : latched_route_type;
-                    m_axis_agg_ingress_port <= is_broadcast ? 8'd0 : latched_agg_ingress;
-
-                    if (m_axis_tready) begin
-                        payload_beat_count <= payload_beat_count + 1;
-
-                        if (payload_beat_count == (PAYLOAD_ITEM_NUM -1)) begin
-                            if (is_broadcast) begin
-                                port_sel <= 1'b1;
-                                payload_beat_count <= 0;
-                            end else begin
-                                in_agg_ready <= 1'b1;
-                            end
-                        end
-                    end
-
-                end
-
-                GEN_HEADER_P1: begin
-                    m_axis_tvalid <= 1'b1;
-                    m_axis_tdata  <= constructed_header;
-                    m_axis_tkeep  <= {AXIS_KEEP_WIDTH{1'b1}};
-                    m_axis_tlast  <= has_payload ? 1'b0 : 1'b1;
-                    m_axis_is_aggregated    <= 1'b1;
-                    m_axis_route_type       <= ROUTE_TO_CHILD_SINGLE;
-                    m_axis_agg_ingress_port <= 8'd1;
-                end
-
-                GEN_PAYLOAD_P1: begin
-                    m_axis_tvalid <= 1'b1;
-
-                    case (payload_beat_count)
-                        4'd0:    m_axis_tdata <= data_payload[  80 +: 512];
-                        4'd1:    m_axis_tdata <= data_payload[ 592 +: 512];
-                        4'd2:    m_axis_tdata <= data_payload[1104 +: 512];
-                        4'd3:    m_axis_tdata <= data_payload[1616 +: 512];
-                        4'd4:    m_axis_tdata <= data_payload[2128 +: 512];
-                        4'd5:    m_axis_tdata <= data_payload[2640 +: 512];
-                        4'd6:    m_axis_tdata <= data_payload[3152 +: 512];
-                        4'd7:    m_axis_tdata <= data_payload[3664 +: 512];
-                        4'd8:    m_axis_tdata <= data_payload[4176 +: 512];
-                        4'd9:    m_axis_tdata <= data_payload[4688 +: 512];
-                        4'd10:   m_axis_tdata <= data_payload[5200 +: 512];
-                        4'd11:   m_axis_tdata <= data_payload[5712 +: 512];
-                        4'd12:   m_axis_tdata <= data_payload[6224 +: 512];
-                        4'd13:   m_axis_tdata <= data_payload[6736 +: 512];
-                        4'd14:   m_axis_tdata <= data_payload[7248 +: 512];
-                        4'd15:   m_axis_tdata <= {{80{1'b0}}, data_payload[8191 : 7760]};
-                        default: m_axis_tdata <= {AXIS_DATA_WIDTH{1'b0}};
-                    endcase
-
-                    m_axis_tkeep <= payload_last_beat ? {58{1'b1}} : {AXIS_KEEP_WIDTH{1'b1}};
-                    m_axis_tlast <= payload_last_beat;
-
-                    m_axis_is_aggregated    <= 1'b1;
-                    m_axis_route_type       <= ROUTE_TO_CHILD_SINGLE;
-                    m_axis_agg_ingress_port <= 8'd1;
+                    m_axis_route_type <= latched_route_type;
+                    m_axis_agg_ingress_port <= latched_agg_ingress;
 
                     if (m_axis_tready) begin
                         payload_beat_count <= payload_beat_count + 1;
@@ -899,6 +849,7 @@ module deparser#(
                             in_agg_ready <= 1'b1;
                         end
                     end
+
                 end
 
             endcase

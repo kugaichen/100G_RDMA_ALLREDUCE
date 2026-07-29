@@ -37,7 +37,7 @@ module icrc_calc #(
 );
 
     // CRC 初始状态: 8 字节全 0xFF (dummy LRH) 后的 CRC32C 状态
-    localparam [31:0] CRC_INIT = 32'hB798B438;
+    localparam [31:0] CRC_INIT = 32'hDEBB20E3;
 
     // FSM
     localparam ST_IDLE    = 2'd0;
@@ -73,15 +73,12 @@ module icrc_calc #(
     always @(*) begin
         masked_data = s_axis_tdata;
         masked_data[8*15+7 : 8*15] = 8'hFF;  // byte 15: TOS
-        masked_data[8*20+7 : 8*20] = 8'hFF;  // byte 20: Flags high
-        masked_data[8*21+7 : 8*21] = 8'hFF;  // byte 21: FragOff low
         masked_data[8*22+7 : 8*22] = 8'hFF;  // byte 22: TTL
         masked_data[8*24+7 : 8*24] = 8'hFF;  // byte 24: IP Checksum high
         masked_data[8*25+7 : 8*25] = 8'hFF;  // byte 25: IP Checksum low
         masked_data[8*40+7 : 8*40] = 8'hFF;  // byte 40: UDP Checksum high
         masked_data[8*41+7 : 8*41] = 8'hFF;  // byte 41: UDP Checksum low
         masked_data[8*46+7 : 8*46] = 8'hFF;  // byte 46: BTH Resv/FECN/BECN
-        masked_data[8*50+7 : 8*50] = 8'hFF;  // byte 50: BTH AckReq/Resv
     end
 
     // 首拍 CRC 输入: 跳过 Eth(14B), 取 byte 14~63 = 50 字节

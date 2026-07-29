@@ -58,10 +58,10 @@ module tb_icrc_calc;
     localparam [511:0] SEND_BEAT1 = 512'h000000000000000000003f3e3d3c3b3a393837363534333231302f2e2d2c2b2a292827262524232221201f1e1d1c1b1a191817161514131211100f0e0d0c0b0a;
 
     // 期望 ICRC (little-endian 整数)
-    // ACK wire bytes: 62 36 93 dd -> LE int = 0xDD933662
-    // SEND wire bytes: 11 7c 09 42 -> LE int = 0x42097C11
-    localparam [31:0] EXPECTED_ICRC_ACK  = 32'hDD933662;
-    localparam [31:0] EXPECTED_ICRC_SEND = 32'h42097C11;
+    // ACK wire bytes: 64 b5 73 5f -> LE int = 0x5F73B564
+    // SEND wire bytes: 19 63 12 ba -> LE int = 0xBA126319
+    localparam [31:0] EXPECTED_ICRC_ACK  = 32'h5F73B564;
+    localparam [31:0] EXPECTED_ICRC_SEND = 32'hBA126319;
 
     integer pass_count = 0;
     integer fail_count = 0;

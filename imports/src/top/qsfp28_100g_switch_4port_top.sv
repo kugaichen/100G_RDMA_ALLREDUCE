@@ -147,6 +147,88 @@ module qsfp28_100g_switch_4port_top (
                                   vio_pkt_length, vio_pkt_count, vio_tx_pattern_sel,
                                   vio_continuous_mode};
 
+    // Optional AllReduce debug configuration VIO.
+    // Default tie-off keeps the design buildable without generating the IP.
+    logic        ar_cfg_update_en;
+    logic [7:0]  ar_cfg_parent_port;
+    logic [3:0]  ar_cfg_child_port_mask;
+    logic        ar_cfg_is_root;
+    logic [47:0] ar_cfg_fpga_mac;
+    logic [31:0] ar_cfg_fpga_ip;
+    logic [23:0] ar_cfg_fpga_qp;
+    logic [15:0] ar_cfg_fpga_udp_port;
+    logic [47:0] ar_cfg_worker0_mac;
+    logic [31:0] ar_cfg_worker0_ip;
+    logic [23:0] ar_cfg_worker0_qp;
+    logic [15:0] ar_cfg_worker0_udp_port;
+    logic [47:0] ar_cfg_worker1_mac;
+    logic [31:0] ar_cfg_worker1_ip;
+    logic [23:0] ar_cfg_worker1_qp;
+    logic [15:0] ar_cfg_worker1_udp_port;
+    logic [47:0] ar_cfg_worker2_mac;
+    logic [31:0] ar_cfg_worker2_ip;
+    logic [23:0] ar_cfg_worker2_qp;
+    logic [15:0] ar_cfg_worker2_udp_port;
+    logic [47:0] ar_cfg_worker3_mac;
+    logic [31:0] ar_cfg_worker3_ip;
+    logic [23:0] ar_cfg_worker3_qp;
+    logic [15:0] ar_cfg_worker3_udp_port;
+
+`ifdef ENABLE_VIO_ALLREDUCE_CFG
+    vio_allreduce_cfg u_vio_allreduce_cfg (
+        .clk        (sys_clk),
+        .probe_out0 (ar_cfg_update_en),
+        .probe_out1 (ar_cfg_parent_port),
+        .probe_out2 (ar_cfg_child_port_mask),
+        .probe_out3 (ar_cfg_is_root),
+        .probe_out4 (ar_cfg_fpga_mac),
+        .probe_out5 (ar_cfg_fpga_ip),
+        .probe_out6 (ar_cfg_fpga_qp),
+        .probe_out7 (ar_cfg_fpga_udp_port),
+        .probe_out8 (ar_cfg_worker0_mac),
+        .probe_out9 (ar_cfg_worker0_ip),
+        .probe_out10(ar_cfg_worker0_qp),
+        .probe_out11(ar_cfg_worker0_udp_port),
+        .probe_out12(ar_cfg_worker1_mac),
+        .probe_out13(ar_cfg_worker1_ip),
+        .probe_out14(ar_cfg_worker1_qp),
+        .probe_out15(ar_cfg_worker1_udp_port),
+        .probe_out16(ar_cfg_worker2_mac),
+        .probe_out17(ar_cfg_worker2_ip),
+        .probe_out18(ar_cfg_worker2_qp),
+        .probe_out19(ar_cfg_worker2_udp_port),
+        .probe_out20(ar_cfg_worker3_mac),
+        .probe_out21(ar_cfg_worker3_ip),
+        .probe_out22(ar_cfg_worker3_qp),
+        .probe_out23(ar_cfg_worker3_udp_port)
+    );
+`else
+    assign ar_cfg_update_en          = 1'b0;
+    assign ar_cfg_parent_port        = 8'h04;
+    assign ar_cfg_child_port_mask    = 4'b0011;
+    assign ar_cfg_is_root            = 1'b1;
+    assign ar_cfg_fpga_mac           = 48'h02_00_00_00_03_07;
+    assign ar_cfg_fpga_ip            = 32'hC0_A8_03_07;
+    assign ar_cfg_fpga_qp            = 24'd0;
+    assign ar_cfg_fpga_udp_port      = 16'd4791;
+    assign ar_cfg_worker0_mac        = 48'h6C_B3_11_88_AB_3E;
+    assign ar_cfg_worker0_ip         = 32'hC0_A8_03_05;
+    assign ar_cfg_worker0_qp         = 24'd22676;
+    assign ar_cfg_worker0_udp_port   = 16'd4791;
+    assign ar_cfg_worker1_mac        = 48'h6C_B3_11_88_A9_4E;
+    assign ar_cfg_worker1_ip         = 32'hC0_A8_03_06;
+    assign ar_cfg_worker1_qp         = 24'd7957;
+    assign ar_cfg_worker1_udp_port   = 16'd4791;
+    assign ar_cfg_worker2_mac        = 48'hB8_59_9F_01_12_26;
+    assign ar_cfg_worker2_ip         = 32'hC0_A8_03_08;
+    assign ar_cfg_worker2_qp         = 24'd28406;
+    assign ar_cfg_worker2_udp_port   = 16'd4791;
+    assign ar_cfg_worker3_mac        = 48'hB8_59_9F_01_11_22;
+    assign ar_cfg_worker3_ip         = 32'hC0_A8_03_05;
+    assign ar_cfg_worker3_qp         = 24'd28406;
+    assign ar_cfg_worker3_udp_port   = 16'd4791;
+`endif
+
     // ========================================================================
     // Per-port clock / reset / status
     // ========================================================================
@@ -325,6 +407,33 @@ module qsfp28_100g_switch_4port_top (
         .axi_resetn   (sys_rst_n),
         .allreduce_clk   (allreduce_clk),
         .allreduce_rst_n (allreduce_rst_n),
+
+        // Debug control plane tie-off. Replace with vio_allreduce_cfg outputs
+        // after the VIO IP is generated in Vivado.
+        .ar_cfg_update_en          (ar_cfg_update_en),
+        .ar_cfg_parent_port        (ar_cfg_parent_port),
+        .ar_cfg_child_port_mask    (ar_cfg_child_port_mask),
+        .ar_cfg_is_root            (ar_cfg_is_root),
+        .ar_cfg_fpga_mac           (ar_cfg_fpga_mac),
+        .ar_cfg_fpga_ip            (ar_cfg_fpga_ip),
+        .ar_cfg_fpga_qp            (ar_cfg_fpga_qp),
+        .ar_cfg_fpga_udp_port      (ar_cfg_fpga_udp_port),
+        .ar_cfg_worker0_mac        (ar_cfg_worker0_mac),
+        .ar_cfg_worker0_ip         (ar_cfg_worker0_ip),
+        .ar_cfg_worker0_qp         (ar_cfg_worker0_qp),
+        .ar_cfg_worker0_udp_port   (ar_cfg_worker0_udp_port),
+        .ar_cfg_worker1_mac        (ar_cfg_worker1_mac),
+        .ar_cfg_worker1_ip         (ar_cfg_worker1_ip),
+        .ar_cfg_worker1_qp         (ar_cfg_worker1_qp),
+        .ar_cfg_worker1_udp_port   (ar_cfg_worker1_udp_port),
+        .ar_cfg_worker2_mac        (ar_cfg_worker2_mac),
+        .ar_cfg_worker2_ip         (ar_cfg_worker2_ip),
+        .ar_cfg_worker2_qp         (ar_cfg_worker2_qp),
+        .ar_cfg_worker2_udp_port   (ar_cfg_worker2_udp_port),
+        .ar_cfg_worker3_mac        (ar_cfg_worker3_mac),
+        .ar_cfg_worker3_ip         (ar_cfg_worker3_ip),
+        .ar_cfg_worker3_qp         (ar_cfg_worker3_qp),
+        .ar_cfg_worker3_udp_port   (ar_cfg_worker3_udp_port),
 
         // S0_AXI (input_arbiter): tie off
         .S0_AXI_AWADDR (32'h0), .S0_AXI_AWVALID(1'b0),

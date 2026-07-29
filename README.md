@@ -14,7 +14,7 @@
 - Worker Receive CQE 成功
 - Worker Send CQE 成功
 
-当前结论是“双 Worker、单轮、1024B RDMA AllReduce 硬件闭环已成功”。多轮持续运行仍需要继续验证，不应把该版本描述为生产级稳定实现。
+当前结论是“双 Worker、单轮、1024B RDMA AllReduce 硬件闭环已成功”。
 
 ## 1. 仓库结构
 

@@ -1825,7 +1825,7 @@ module aggregator_core_top #(
         // (typer_ack_up_en || typer_ack_down_en)             ? (grant_typer && deparser_in_ready) : 
         (typer_data_root_up_en || typer_data_noroot_up_en) ? up_retrans_to_typer_in_ready :       
         (typer_data_down_en)                               ? down_broadcast_to_typer_in_ready :   
-        1'b1; 
+        typer_to_parser_ready;
 
 
 endmodule

@@ -1,5 +1,9 @@
 # 100G RDMA AllReduce FPGA
 
+<img width="5044" height="1960" alt="image" src="https://github.com/user-attachments/assets/0a2c1f8a-e556-43dd-a63b-26cda415e7e0" />
+
+
+
 本仓库保存 4×100G FPGA RoCEv2/RDMA AllReduce 工程的 RTL、Vivado IP
 配置、约束、VIO/Hardware Manager 脚本、Worker 测试程序和实验报告。
 

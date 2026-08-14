@@ -1,4 +1,5 @@
 `timescale 1ns / 1ps
+`include "moe_defs.vh"
 //////////////////////////////////////////////////////////////////////////////////
 // Company: 
 // Engineer: 
@@ -59,7 +60,8 @@ module parser #(
 
     parameter FIFO_DEPTH = 32,
 
-    parameter RAM_SLOT_WIDTH = 8
+    parameter RAM_SLOT_WIDTH = 8,
+    parameter MOE_DESC_WIDTH = `MOE_DESC_WIDTH
     
 )(
     input wire                          axis_clk,
@@ -95,6 +97,7 @@ module parser #(
     input wire [31:0]                   cfg_local_ip,
     input wire [15:0]                   cfg_local_udp_port,
     input wire [23:0]                   cfg_local_qpn,
+    input wire                          cfg_enable_moe,
 
 
     // --- BRAM 写命令输出端口 ---
@@ -104,6 +107,16 @@ module parser #(
     output reg                              payload_wr_en,
     output reg [METADATA_LEN-1:0]           latched_metadata_for_write,
     input wire                              payload_wr_ready,
+
+    // ---- MoE Phase 1 descriptor sideband ----
+    // This sideband is observational for now. It does not alter the existing
+    // AllReduce aggregate/pass-through path until later phases consume it.
+    output reg                              moe_desc_valid,
+    output reg [7:0]                        moe_desc_op_type,
+    output reg [MOE_DESC_WIDTH-1:0]         moe_desc_out,
+    output reg                              moe_payload_valid,
+    output reg [7:0]                        moe_payload_op_type,
+    output reg [PAYLOAD_ITEM_WIDTH-1:0]     moe_payload_data,
 
     // ---- DEBUG 用: parser stage1 抽出的 peer_mac/peer_ip 最低字节 ----
     // 上板时若 hash 常 miss, 需要判断 CMAC 送进来的 AXIS 字节序与 parser
@@ -117,6 +130,7 @@ module parser #(
     output wire                             dbg_lookup_hit,
     output wire                             dbg_endpoint_match,
     output wire                             dbg_send_only_match,
+    output wire                             dbg_moe_prefix_match,
     output wire [7:0]                       dbg_opcode,
     output wire [23:0]                      dbg_qpn,
 
@@ -311,8 +325,10 @@ module parser #(
 
     reg                         s4_egress_en;
     reg                         s4_aggregate_en;
+    reg                         s4_moe_consume_en;
+    reg [7:0]                   s4_moe_op_type;
     reg [35*8-1:0]              s4_header_out;
-    reg [METADATA_LEN-1:0]      s4_metadata_out;            
+    reg [METADATA_LEN-1:0]      s4_metadata_out;
     
     localparam PIPE_COPY_BUS_WIDTH = AXIS_DATA_WIDTH + 8 + 16 +
                                      (2 * PORT_WIDTH) + (2 * IP_ADDR_WIDTH) +
@@ -522,6 +538,27 @@ module parser #(
     wire s3_ack_match       = s3_endpoint_match && (s3_opcode_wire == 8'h11);
     wire s3_protocol_match  = s3_send_only_match || s3_ack_match;
 
+    // MoE base prefix lives at RoCE payload byte 0, i.e. packet wire byte 54.
+    // The current prototype uses all 10 bytes visible in the cached first beat.
+    wire [15:0] s3_moe_magic = {s3_header_buffer_holdfix[439:432],
+                                s3_header_buffer_holdfix[447:440]};
+    wire [7:0]  s3_moe_version = s3_header_buffer_holdfix[455:448];
+    wire [7:0]  s3_moe_op_type = s3_header_buffer_holdfix[463:456];
+    wire [7:0]  s3_moe_owner_rank = s3_header_buffer_holdfix[471:464];
+    wire [7:0]  s3_moe_flags = s3_header_buffer_holdfix[479:472];
+    wire [31:0] s3_moe_seq_low = {s3_header_buffer_holdfix[487:480],
+                                  s3_header_buffer_holdfix[495:488],
+                                  s3_header_buffer_holdfix[503:496],
+                                  s3_header_buffer_holdfix[511:504]};
+    wire s3_moe_op_known = (s3_moe_op_type == `MOE_OP_DISPATCH) ||
+                           (s3_moe_op_type == `MOE_OP_COMBINE_INIT) ||
+                           (s3_moe_op_type == `MOE_OP_COMBINE_DATA) ||
+                           (s3_moe_op_type == `MOE_OP_COMBINE_RESULT);
+    wire s3_moe_prefix_match = cfg_enable_moe && s3_send_only_match &&
+                               (s3_moe_magic == `MOE_MAGIC) &&
+                               (s3_moe_version == 8'h01) &&
+                               s3_moe_op_known;
+
     // 2. 计算取模 (用 host 视角真整数)
     assign s3_psn_mod_8b = s3_apsn_host % BUFFER_SLOTS;
 
@@ -535,6 +572,7 @@ module parser #(
     assign dbg_lookup_hit       = lookup_hit_holdfix;
     assign dbg_endpoint_match   = s3_endpoint_match;
     assign dbg_send_only_match  = s3_send_only_match;
+    assign dbg_moe_prefix_match = s3_valid_holdfix && lookup_hit_holdfix && s3_moe_prefix_match;
     assign dbg_opcode           = s3_opcode_wire;
     assign dbg_qpn              = s3_qpn_host[23:0];
 
@@ -722,12 +760,22 @@ module parser #(
 
             s4_aggregate_en <= 0;
             s4_egress_en <= 0;
+            s4_moe_consume_en <= 1'b0;
+            s4_moe_op_type <= `MOE_OP_NONE;
+            moe_desc_valid <= 1'b0;
+            moe_desc_op_type <= `MOE_OP_NONE;
+            moe_desc_out <= {MOE_DESC_WIDTH{1'b0}};
         end
         else begin
             s4_valid <= s3_valid_holdfix;
             agg_payload_fire_en <= 0;
             s4_egress_en <= 0;
             s4_aggregate_en <= 0;
+            s4_moe_consume_en <= 1'b0;
+            s4_moe_op_type <= `MOE_OP_NONE;
+            moe_desc_valid <= 1'b0;
+            moe_desc_op_type <= `MOE_OP_NONE;
+            moe_desc_out <= {MOE_DESC_WIDTH{1'b0}};
 
             if (s3_valid_holdfix) begin
                 s4_lookup_data <= lookup_data_holdfix;
@@ -756,7 +804,9 @@ module parser #(
                     s4_apsn <= s3_apsn_host;
                     s4_psn_out <= s3_apsn_host % BUFFER_SLOTS;
                     s4_root_info <= lookup_data_holdfix[8];
-                    s4_aggregate_en <= 1;
+                    s4_aggregate_en <= !s3_moe_prefix_match;
+                    s4_moe_consume_en <= s3_moe_prefix_match;
+                    s4_moe_op_type <= s3_moe_prefix_match ? s3_moe_op_type : `MOE_OP_NONE;
 
                     // AETH 提取 (wire byte 54-57, 仅 ACK 包有效)
                     s4_aeth_syndrome <= s3_header_buffer_holdfix[439:432];
@@ -783,7 +833,22 @@ module parser #(
                         s3_psn_mod_8b,
                         lookup_data_holdfix[7:0]
                     };
-                    agg_payload_fire_en <= 1'b1;
+                    if (s3_moe_prefix_match) begin
+                        moe_desc_valid <= 1'b1;
+                        moe_desc_op_type <= s3_moe_op_type;
+                        moe_desc_out <= {
+                            s3_moe_magic,
+                            s3_moe_version,
+                            s3_moe_op_type,
+                            s3_moe_owner_rank,
+                            s3_moe_flags,
+                            s3_moe_seq_low,
+                            s3_apsn_host,
+                            lookup_data_holdfix[7:0],
+                            s3_psn_mod_8b[7:0]
+                        };
+                    end
+                    agg_payload_fire_en <= !s3_moe_prefix_match;
                 end
                 else begin
                     s4_qpn <= {QPN_LEN{1'b0}};
@@ -791,6 +856,8 @@ module parser #(
                     s4_psn_out <= 8'b0;
                     s4_root_info <= 8'b0;
                     s4_egress_en <= 1;
+                    s4_moe_consume_en <= 1'b0;
+                    s4_moe_op_type <= `MOE_OP_NONE;
                     s4_opcode <= {OPCODE_WIDTH{1'b0}};
                     s4_header_out <= {PKT_HDR_LEN{1'b0}};
                     s4_metadata_out <= {METADATA_LEN{1'b0}};
@@ -809,6 +876,8 @@ module parser #(
 
     reg                     pending_egress_req;
     reg                     pending_aggregate_req;
+    reg                     pending_moe_consume_req;
+    reg [7:0]               pending_moe_op_type;
     reg [PKT_HDR_LEN-1:0]   latched_s4_header;
     reg [METADATA_LEN-1:0]  latched_s4_metadata;
     reg [OPCODE_WIDTH-1:0]  latched_s4_opcode;
@@ -874,6 +943,8 @@ module parser #(
     assign agg_req_consumed = (payload_buffer_next_state == PB_PROCESS) && (payload_buffer_current_state == PB_IDLE);
 
     wire effective_aggregate_req = (s4_valid && s4_aggregate_en) || pending_aggregate_req;
+    wire effective_moe_consume_req = (s4_valid && s4_moe_consume_en) || pending_moe_consume_req;
+    wire effective_payload_consume_req = effective_aggregate_req || effective_moe_consume_req;
 
     // Output & PAYLOAD Controller
     assign fifo_rd_en =  pass_through_fifo_rd_en || payload_buffer_fifo_rd_en;
@@ -881,8 +952,10 @@ module parser #(
     always @(posedge axis_clk or negedge rst_n) begin
         if (!rst_n) begin
             pending_egress_req <= 1'b0;
-            
+
             pending_aggregate_req <= 1'b0;
+            pending_moe_consume_req <= 1'b0;
+            pending_moe_op_type <= `MOE_OP_NONE;
             latched_s4_header   <= 0;
             latched_s4_metadata <= 0;
             latched_s4_opcode   <= 0;
@@ -912,6 +985,16 @@ module parser #(
 
             else if (agg_req_consumed) begin
                 pending_aggregate_req <= 1'b0;
+            end
+
+            if (s4_valid && s4_moe_consume_en && !agg_req_consumed) begin
+                pending_moe_consume_req <= 1'b1;
+                pending_moe_op_type <= s4_moe_op_type;
+            end
+
+            else if (agg_req_consumed && pending_moe_consume_req && !pending_aggregate_req) begin
+                pending_moe_consume_req <= 1'b0;
+                pending_moe_op_type <= `MOE_OP_NONE;
             end
         end
     end
@@ -957,7 +1040,8 @@ module parser #(
         case (pass_through_current_state)
             PT_IDLE: begin
                 // if (s4_egress_en && s4_valid) begin
-                if (effective_egress_req && (payload_buffer_current_state == PB_IDLE)) begin        // 增加互斥
+                if (effective_egress_req && (payload_buffer_current_state == PB_IDLE) &&
+                    !effective_moe_consume_req) begin        // 增加互斥
                     pass_through_next_state = PT_STREAM;
                 end
             end
@@ -1051,6 +1135,9 @@ module parser #(
 
     
     reg                                                         is_first_beat;
+    reg                                                         drop_payload_write;
+    reg                                                         moe_payload_capture_en;
+    reg [7:0]                                                   current_moe_payload_op_type;
     reg [$clog2(SHIFTER_WIDTH):0]                               remain_in_shift_container;            //在每一拍shift_container中未处理的数据
     reg [$clog2(AXIS_DATA_WIDTH):0]                             valid_in_axis_data;                   //每一拍中axis_data有效的字段长度
     reg [PAYLOAD_ITEM_COUNT_WIDTH:0]                            item_counter;                      //计算256个单元的offset
@@ -1094,7 +1181,7 @@ module parser #(
             // end
 
             PB_IDLE: begin
-                if (effective_aggregate_req && agg_ready_in && (pass_through_current_state == PT_IDLE)) begin
+                if (effective_payload_consume_req && agg_ready_in && (pass_through_current_state == PT_IDLE)) begin
                     payload_buffer_next_state = PB_PROCESS;
                 end
             end
@@ -1120,10 +1207,17 @@ module parser #(
             shifter_container <= 0;
             shifter_fifo_lout <= 0;
             latched_metadata_for_write <= 0;
+            drop_payload_write <= 1'b0;
+            moe_payload_capture_en <= 1'b0;
+            current_moe_payload_op_type <= `MOE_OP_NONE;
+            moe_payload_valid <= 1'b0;
+            moe_payload_op_type <= `MOE_OP_NONE;
+            moe_payload_data <= {PAYLOAD_ITEM_WIDTH{1'b0}};
         end
 
         else begin
-            payload_wr_en <= 1'b0; 
+            payload_wr_en <= 1'b0;
+            moe_payload_valid <= 1'b0;
 
             case (payload_buffer_current_state)
                 PB_IDLE: begin
@@ -1132,10 +1226,27 @@ module parser #(
                         if (s4_valid && s4_aggregate_en) begin
                             slot_addr <= s4_metadata_out_holdfix[15:8];
                             latched_metadata_for_write <= s4_metadata_out_holdfix;
+                            drop_payload_write <= 1'b0;
                         end
-                        else begin
+                        else if (pending_aggregate_req) begin
                             slot_addr <= latched_s4_metadata[15:8];
                             latched_metadata_for_write <= latched_s4_metadata;
+                            drop_payload_write <= 1'b0;
+                        end
+                        else begin
+                            slot_addr <= {RING_SLOT_WIDTH{1'b0}};
+                            latched_metadata_for_write <= {METADATA_LEN{1'b0}};
+                            drop_payload_write <= 1'b1;
+                            if (s4_valid && s4_moe_consume_en) begin
+                                moe_payload_capture_en <= (s4_moe_op_type == `MOE_OP_COMBINE_DATA) ||
+                                                          (s4_moe_op_type == `MOE_OP_DISPATCH);
+                                current_moe_payload_op_type <= s4_moe_op_type;
+                            end
+                            else begin
+                                moe_payload_capture_en <= (pending_moe_op_type == `MOE_OP_COMBINE_DATA) ||
+                                                          (pending_moe_op_type == `MOE_OP_DISPATCH);
+                                current_moe_payload_op_type <= pending_moe_op_type;
+                            end
                         end
                  
                         item_counter <= 0;
@@ -1163,15 +1274,22 @@ module parser #(
                     if (!shifter_fifo_lout && fifo_dout_valid && payload_wr_ready) begin
                         if (is_first_beat) begin
                             is_first_beat <= 1'b0;
-                            payload_wr_en <= 1'b1;
+                            payload_wr_en <= !drop_payload_write;
                             payload_wr_addr <= {slot_addr_holdfix, item_counter_holdfix[3:0]};
                             payload_wr_data <= shifter_container | (fifo_data_out << remain_in_shift_container);
+                            if (drop_payload_write && moe_payload_capture_en) begin
+                                moe_payload_valid <= 1'b1;
+                                moe_payload_op_type <= current_moe_payload_op_type;
+                                moe_payload_data <= (shifter_container >> (`MOE_PREFIX_BASE_BYTES * 8)) |
+                                                    (fifo_data_out << (AXIS_DATA_WIDTH - ORIGIN_HDR_LEN -
+                                                                      (`MOE_PREFIX_BASE_BYTES * 8)));
+                            end
                             shifter_container <= fifo_data_out >> ORIGIN_HDR_LEN;
                             item_counter <= item_counter + 1;
                         end
                         else if (item_counter < PAYLOAD_ITEM_NUM && payload_wr_ready) begin
 
-                            payload_wr_en <= 1'b1;
+                            payload_wr_en <= !drop_payload_write;
                             payload_wr_addr <= {slot_addr_holdfix, item_counter_holdfix[3:0]};
                             payload_wr_data <= shifter_container | (fifo_data_out << remain_in_shift_container);
                             shifter_container <= fifo_data_out >> ORIGIN_HDR_LEN;
@@ -1196,6 +1314,9 @@ module parser #(
                         shifter_fifo_lout <= 0;
                         remain_in_shift_container <= 0;
                         item_counter <= 0;
+                        drop_payload_write <= 1'b0;
+                        moe_payload_capture_en <= 1'b0;
+                        current_moe_payload_op_type <= `MOE_OP_NONE;
                     end
 
                 end

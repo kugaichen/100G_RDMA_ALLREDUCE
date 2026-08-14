@@ -31,9 +31,13 @@
     input   wire                clk,
     input   wire                rst_n, 
     input   wire                new_slot_en,
+    input   wire                in_valid,
     input   wire [3*8-1:0]      in_metadata,
+    input   wire [SLOTS_WIDTH-1:0]  new_slot_addr_override,
+    input   wire                    new_slot_addr_override_en,
     // input   wire                in_valid,
     output  wire                in_ready,
+    output  wire                out_valid,
     
     input   wire                    out_ready,
     input   wire                    new_arrival_state_wr_grant, 
@@ -60,6 +64,7 @@
     reg                         s2_valid;
 
     reg                         s3_valid;
+    wire [SLOTS_WIDTH-1:0]      target_slot_addr;
 
     wire                        s1_valid_holdfix;
     wire                        s2_valid_holdfix;
@@ -88,6 +93,10 @@
 
     assign in_ready = s1_can_accept;
     assign out_valid = s3_valid;
+    wire slot_issue_en = new_slot_en && in_valid;
+    assign target_slot_addr = new_slot_addr_override_en ?
+                              new_slot_addr_override :
+                              (in_metadata[15:8] + WINDOWSIZE);
 
     // data
     assign new_aggregate_bram_wr_vector_pack = 0;
@@ -168,16 +177,16 @@
 
         else begin
             if (s2_can_accept || !s1_valid) begin
-                s1_valid <= new_slot_en;
-                new_arrival_state_wr_en <= new_slot_en;
-                new_arrival_state_wr_addr <= in_metadata[15:8] + WINDOWSIZE;
+                s1_valid <= slot_issue_en;
+                new_arrival_state_wr_en <= slot_issue_en;
+                new_arrival_state_wr_addr <= target_slot_addr;
                 new_arrival_state_wr_data <= 0;
-                new_degree_wr_en <= new_slot_en;
-                new_degree_wr_addr <= in_metadata[15:8] + WINDOWSIZE;
+                new_degree_wr_en <= slot_issue_en;
+                new_degree_wr_addr <= target_slot_addr;
                 new_degree_wr_data <= 0;
 
-                new_aggregate_bram_wr_addr <= in_metadata[15:8] + WINDOWSIZE;
-                new_aggregate_bram_wr_en_pack <= {16{new_slot_en}};
+                new_aggregate_bram_wr_addr <= target_slot_addr;
+                new_aggregate_bram_wr_en_pack <= {16{slot_issue_en}};
 
             end
         end

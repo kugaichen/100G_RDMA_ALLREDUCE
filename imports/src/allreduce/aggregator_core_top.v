@@ -60,6 +60,33 @@ module aggregator_core_top #(
     input wire [METADATA_LEN-1:0]                               parser_payload_wr_metadata,
     output wire                                                 parser_out_ready, // Backpressure to Parser
 
+    // MoE slot-plane init path. This reuses the original AllReduce
+    // new_slot_creater and its arrival/degree/aggregate BRAM arbiters.
+    input wire                                                  moe_slot_init_valid,
+    input wire [ADDR_WIDTH-1:0]                                 moe_slot_init_addr,
+    output wire                                                 moe_slot_init_ready,
+    output wire                                                 moe_slot_init_fire,
+
+    // MoE aggregate update path. This path uses the original aggregate BRAM
+    // read/write arbiters and updates one 512-bit payload item in place.
+    input wire                                                  moe_aggregate_update_valid,
+    input wire [ADDR_WIDTH-1:0]                                 moe_aggregate_update_addr,
+    input wire [PAYLOAD_ITEM_WIDTH-1:0]                         moe_aggregate_update_data,
+    output wire                                                 moe_aggregate_update_ready,
+    output reg                                                  moe_aggregate_update_done,
+    output reg [PAYLOAD_ITEM_WIDTH-1:0]                         moe_aggregate_update_sum_dbg,
+    input wire                                                  moe_aggregate_query_valid,
+    input wire [ADDR_WIDTH-1:0]                                 moe_aggregate_query_addr,
+    output wire                                                 moe_aggregate_query_ready,
+    output reg                                                  moe_aggregate_query_done,
+    output reg [PAYLOAD_ITEM_WIDTH-1:0]                         moe_aggregate_query_data,
+    input wire                                                  moe_arrival_update_valid,
+    input wire [ADDR_WIDTH-1:0]                                 moe_arrival_update_addr,
+    input wire [5:0]                                            moe_arrival_update_lane_id,
+    output wire                                                 moe_arrival_update_ready,
+    output reg                                                  moe_arrival_update_done,
+    output reg [DATA_WIDTH-1:0]                                 moe_arrival_update_bitmap_dbg,
+
     // =================================================================
     // OUTPUTS to Deparser
     // =================================================================
@@ -79,6 +106,24 @@ module aggregator_core_top #(
     // =============================================================================
     // SECTION 1: INTERNAL WIRE DECLARATIONS
     // =============================================================================
+
+    localparam ADD_CHUNK_WIDTH = 32;
+    localparam CHUNKS_ITEM     = PAYLOAD_ITEM_WIDTH / ADD_CHUNK_WIDTH;
+
+    localparam MOE_AGG_IDLE      = 3'd0;
+    localparam MOE_AGG_READ_REQ  = 3'd1;
+    localparam MOE_AGG_WAIT_READ = 3'd2;
+    localparam MOE_AGG_WRITE_REQ = 3'd3;
+    localparam MOE_AGG_DONE       = 3'd4;
+    localparam MOE_AGG_QUERY_DONE = 3'd5;
+
+    localparam MOE_ARR_IDLE      = 3'd0;
+    localparam MOE_ARR_READ_REQ  = 3'd1;
+    localparam MOE_ARR_WAIT_READ = 3'd2;
+    localparam MOE_ARR_WRITE_REQ = 3'd3;
+    localparam MOE_ARR_DONE      = 3'd4;
+
+    genvar moe_sum_idx;
 
     // 1.1 --- Typer ---
     wire [METADATA_LEN-1:0]                                     metadata_with_type; 
@@ -132,6 +177,13 @@ module aggregator_core_top #(
     // later than a direct BRAM read (buffer_controller compensates by routing
     // retrans path through S_PIPE/S_PIPE2 like the other paths).
     wire [PAYLOAD_ITEM_NUM*PAYLOAD_ITEM_WIDTH-1:0]              payload_bram_rd_pack_distributed;
+    reg                                                          parser_payload_wr_en_r;
+    reg [METADATA_LEN-1:0]                                       parser_payload_wr_metadata_r;
+    reg [RING_SLOT_WIDTH+PAYLOAD_ITEM_COUNT_WIDTH-1:0]           parser_payload_wr_addr_r;
+    reg [PAYLOAD_ITEM_WIDTH-1:0]                                 parser_payload_wr_data_r;
+    (* max_fanout = 12 *) reg [INGRESS_PROT_NUM:0]               payload_bram_bank_wr_en_r2;
+    reg [RING_SLOT_WIDTH+PAYLOAD_ITEM_COUNT_WIDTH-1:0]           parser_payload_wr_addr_r2;
+    reg [PAYLOAD_ITEM_WIDTH-1:0]                                 parser_payload_wr_data_r2;
 
 
     // 1.3 --- aggregate_bram ---
@@ -219,6 +271,7 @@ module aggregator_core_top #(
 
     wire                                                        buffer_to_up_retrans_ready;
     wire                                                        buffer_to_down_broadcast_ready;
+    wire                                                        up_broadcast_to_buffer_ready;
 
 
     // 1.6 --- up_broadcast_checkor_arrival_update ---
@@ -247,7 +300,7 @@ module aggregator_core_top #(
     wire                                                        up_broadcast_to_deparser_FAN_trans_en;
     wire [METADATA_LEN-1:0]                                     up_broadcast_to_deparser_metadata_out;
 
-    wire                                                        up_broadcast_to_deparser_aggregate_bram_out;
+    wire [PAYLOAD_ITEM_NUM*PAYLOAD_ITEM_WIDTH-1:0]              up_broadcast_to_deparser_aggregate_bram_out;
     wire                                                        in_ready;
 
     wire                                                        up_broadcast_to_up_retrans_ready;
@@ -269,8 +322,22 @@ module aggregator_core_top #(
     wire [PAYLOAD_ITEM_NUM-1:0]                                 sloter_to_aggregate_bram_arb_wr_en_pack;
 
     wire                                                        sloter_to_up_broadcast_ready;
+    wire                                                        sloter_new_slot_en;
+    wire [METADATA_LEN-1:0]                                     sloter_metadata_in;
+    wire [ADDR_WIDTH-1:0]                                       sloter_addr_override;
+    wire                                                        sloter_addr_override_en;
 
     assign sloter_out_ready = 1'b1;
+    assign moe_slot_init_ready = sloter_to_up_broadcast_ready &&
+                                 !up_broadcast_to_sloter_new_slot_en;
+    assign moe_slot_init_fire = moe_slot_init_valid && moe_slot_init_ready;
+    assign sloter_new_slot_en = up_broadcast_to_sloter_new_slot_en ||
+                                moe_slot_init_fire;
+    assign sloter_metadata_in = up_broadcast_to_sloter_new_slot_en ?
+                                up_broadcast_to_sloter_metadata_out :
+                                {METADATA_LEN{1'b0}};
+    assign sloter_addr_override = moe_slot_init_addr;
+    assign sloter_addr_override_en = moe_slot_init_fire;
 
     // 1.8 --- down_broadcast_checkor_arrival_updater ---
     wire                                                        down_broadcast_to_typer_in_ready;
@@ -298,6 +365,7 @@ module aggregator_core_top #(
     // 1.9 --- aggregate_bram_rd_arbiter ---
     wire                                                        aggregate_bram_arb_to_up_broadcast_rd_grant;
     wire                                                        aggregate_bram_arb_to_buffer_rd_grant;
+    wire                                                        aggregate_bram_arb_to_moe_rd_grant;
     wire [PAYLOAD_ITEM_NUM-1:0]                                 aggregate_bram_rd_en_pack;
     wire [ADDR_WIDTH-1:0]                                       aggregate_bram_rd_addr_pack;   
 
@@ -305,14 +373,30 @@ module aggregator_core_top #(
     // 1.10 --- aggregate_bram_wr_arbiter ---
     wire                                                        aggregate_bram_arb_to_buffer_wr_grant;
     wire                                                        aggregate_bram_arb_to_sloter_wr_grant;
+    wire                                                        aggregate_bram_arb_to_moe_wr_grant;
     wire [PAYLOAD_ITEM_NUM*PAYLOAD_ITEM_WIDTH-1:0]              aggregate_bram_wr_data_pack;
     wire [ADDR_WIDTH-1:0]                                       aggregate_bram_wr_addr_pack;
     wire [PAYLOAD_ITEM_NUM-1:0]                                 aggregate_bram_wr_en_pack;
+
+    wire [PAYLOAD_ITEM_NUM-1:0]                                 moe_to_aggregate_bram_arb_rd_en_pack;
+    wire [ADDR_WIDTH-1:0]                                       moe_to_aggregate_bram_arb_rd_addr;
+    wire [PAYLOAD_ITEM_NUM-1:0]                                 moe_to_aggregate_bram_arb_wr_en_pack;
+    wire [ADDR_WIDTH-1:0]                                       moe_to_aggregate_bram_arb_wr_addr;
+    wire [PAYLOAD_ITEM_NUM*PAYLOAD_ITEM_WIDTH-1:0]              moe_to_aggregate_bram_arb_wr_vector_pack;
+
+    reg [2:0]                                                    moe_aggregate_state;
+    reg [ADDR_WIDTH-1:0]                                         moe_aggregate_addr_r;
+    reg [PAYLOAD_ITEM_WIDTH-1:0]                                 moe_aggregate_payload_r;
+    reg [PAYLOAD_ITEM_WIDTH-1:0]                                 moe_aggregate_old_r;
+    reg                                                          moe_aggregate_query_active_r;
+    wire [PAYLOAD_ITEM_WIDTH-1:0]                                moe_aggregate_sum_comb;
+    wire [PAYLOAD_ITEM_WIDTH-1:0]                                moe_aggregate_rd_item0;
 
     // 1.11 --- arrival_state_rd_arbiter ---
     wire                                                        arrival_arb_to_down_broadcast_rd_grant0;
     wire                                                        arrival_arb_to_up_broadcast_rd_grant1;
     wire                                                        arrival_arb_to_up_retrans_rd_grant2;
+    wire                                                        arrival_arb_to_moe_rd_grant3;
     wire                                                        allreduce_arrival_state_rd_en;
     wire [ADDR_WIDTH-1:0]                                       allreduce_arrival_state_rd_addr;
 
@@ -321,9 +405,21 @@ module aggregator_core_top #(
     wire                                                        arrival_arb_to_sloter_wr_grant1;
     wire                                                        arrival_arb_to_up_broadcast_wr_grant2;
     wire                                                        arrival_arb_to_up_retrans_wr_grant3;
+    wire                                                        arrival_arb_to_moe_wr_grant4;
     wire                                                        allreduce_arrival_state_wr_en;
     wire [ADDR_WIDTH-1:0]                                       allreduce_arrival_state_wr_addr;
     wire [DATA_WIDTH-1:0]                                       allreduce_arrival_state_wr_data;
+    wire                                                        moe_to_arrival_arb_rd_en;
+    wire [ADDR_WIDTH-1:0]                                       moe_to_arrival_arb_rd_addr;
+    wire                                                        moe_to_arrival_arb_wr_en;
+    wire [ADDR_WIDTH-1:0]                                       moe_to_arrival_arb_wr_addr;
+    wire [DATA_WIDTH-1:0]                                       moe_to_arrival_arb_wr_data;
+    reg [2:0]                                                   moe_arrival_state;
+    reg [ADDR_WIDTH-1:0]                                        moe_arrival_addr_r;
+    reg [5:0]                                                   moe_arrival_lane_id_r;
+    reg [DATA_WIDTH-1:0]                                        moe_arrival_old_bitmap_r;
+    wire [DATA_WIDTH-1:0]                                       moe_arrival_lane_mask;
+    wire [DATA_WIDTH-1:0]                                       moe_arrival_next_bitmap;
 
     // 1.13 --- arrival_state_bram --- 
     wire [DATA_WIDTH-1:0]                                       allreduce_arrival_state_rd_data;
@@ -354,6 +450,7 @@ module aggregator_core_top #(
     wire deparser_to_buffer_ready;
     wire deparser_to_down_broadcast_ready;
     wire deparser_to_up_broadcast_ready;
+    wire pipe_can_accept;
 
 
     // =============================================================================
@@ -421,19 +518,10 @@ module aggregator_core_top #(
     // Pipeline registers: break parser → payload BRAM control path
     // (parser is in SLR1, BRAMs span SLR0+SLR1, the bank decode + demux
     //  combinational path was the worst setup violator at 250MHz)
-    reg                                                          parser_payload_wr_en_r;
-    reg [METADATA_LEN-1:0]                                       parser_payload_wr_metadata_r;
-    reg [RING_SLOT_WIDTH+PAYLOAD_ITEM_COUNT_WIDTH-1:0]           parser_payload_wr_addr_r;
-    reg [PAYLOAD_ITEM_WIDTH-1:0]                                 parser_payload_wr_data_r;
-
     // Stage 2: bank-decoded wr_en and forwarded addr/data. Splits the
     // long fanout-47 LUT chain to the demux into two cycles. max_fanout
     // on the per-bank wr_en reg lets each replica be placed near its
     // own ~16 BRAMs (12 chosen so the synthesizer makes ~2 replicas).
-    (* max_fanout = 12 *) reg [INGRESS_PROT_NUM:0]               payload_bram_bank_wr_en_r2;
-    reg [RING_SLOT_WIDTH+PAYLOAD_ITEM_COUNT_WIDTH-1:0]           parser_payload_wr_addr_r2;
-    reg [PAYLOAD_ITEM_WIDTH-1:0]                                 parser_payload_wr_data_r2;
-
     integer pi;
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -468,17 +556,17 @@ module aggregator_core_top #(
             // --- Demux and BRAM array for each bank ---
             // Note: Each bank has its own demux and its own array of 16 BRAMs
             wire [PAYLOAD_ITEM_NUM-1:0]                         parser_to_payload_bram_wr_en_demux;
-            wire [RING_SLOT_WIDTH-1:0]                          parser_to_payload_bram_wr_addr_bus;
+            wire [ADDR_WIDTH-1:0]                                parser_to_payload_bram_wr_addr_bus;
             wire [PAYLOAD_ITEM_WIDTH-1:0]                       parser_to_payload_bram_wr_data_bus;
 
             bram_write_demux #(
                 .PARALLEL_NUM(PAYLOAD_ITEM_NUM),
-                .SLOT_ADDR_WIDTH(RING_SLOT_WIDTH),
+                .SLOT_ADDR_WIDTH(ADDR_WIDTH),
                 .ITEM_ADDR_WIDTH(PAYLOAD_ITEM_COUNT_WIDTH),
                 .PAYLOAD_ITEM_WIDTH(PAYLOAD_ITEM_WIDTH)
             ) parser_payload_demux(
                 .parser_wr_en(payload_bram_bank_wr_en[port_idx]),
-                .parser_wr_addr(parser_payload_wr_addr_r2),
+                .parser_wr_addr(parser_payload_wr_addr_r2[ADDR_WIDTH+PAYLOAD_ITEM_COUNT_WIDTH-1:0]),
                 .parser_wr_data(parser_payload_wr_data_r2),
                 .parallel_wr_addr(parser_to_payload_bram_wr_addr_bus),
                 .parallel_wr_en(parser_to_payload_bram_wr_en_demux),
@@ -599,8 +687,170 @@ module aggregator_core_top #(
     //
     // The adder operands come from BRAM rd_data registered outputs (sticky
     // until next rd_en), so no extra latches are needed.
-    localparam ADD_CHUNK_WIDTH = 32;
-    localparam CHUNKS_ITEM     = PAYLOAD_ITEM_WIDTH / ADD_CHUNK_WIDTH;
+    assign moe_aggregate_update_ready = (moe_aggregate_state == MOE_AGG_IDLE);
+    assign moe_aggregate_query_ready = (moe_aggregate_state == MOE_AGG_IDLE) &&
+                                       (!moe_aggregate_update_valid);
+    assign moe_aggregate_rd_item0 = aggregate_bram_rd_data_pack[PAYLOAD_ITEM_WIDTH-1:0];
+    assign moe_to_aggregate_bram_arb_rd_en_pack =
+        (moe_aggregate_state == MOE_AGG_READ_REQ) ?
+        {{(PAYLOAD_ITEM_NUM-1){1'b0}}, 1'b1} :
+        {PAYLOAD_ITEM_NUM{1'b0}};
+    assign moe_to_aggregate_bram_arb_rd_addr = moe_aggregate_addr_r;
+    assign moe_to_aggregate_bram_arb_wr_en_pack =
+        (moe_aggregate_state == MOE_AGG_WRITE_REQ) ?
+        {{(PAYLOAD_ITEM_NUM-1){1'b0}}, 1'b1} :
+        {PAYLOAD_ITEM_NUM{1'b0}};
+    assign moe_to_aggregate_bram_arb_wr_addr = moe_aggregate_addr_r;
+    assign moe_to_aggregate_bram_arb_wr_vector_pack = {
+        {(PAYLOAD_ITEM_NUM-1)*PAYLOAD_ITEM_WIDTH{1'b0}},
+        moe_aggregate_sum_comb
+    };
+
+    generate
+        for (moe_sum_idx = 0; moe_sum_idx < CHUNKS_ITEM; moe_sum_idx = moe_sum_idx + 1) begin : moe_agg_add_chunks
+            assign moe_aggregate_sum_comb[(moe_sum_idx+1)*ADD_CHUNK_WIDTH-1 -: ADD_CHUNK_WIDTH] =
+                moe_aggregate_old_r[(moe_sum_idx+1)*ADD_CHUNK_WIDTH-1 -: ADD_CHUNK_WIDTH] +
+                moe_aggregate_payload_r[(moe_sum_idx+1)*ADD_CHUNK_WIDTH-1 -: ADD_CHUNK_WIDTH];
+        end
+    endgenerate
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            moe_aggregate_state <= MOE_AGG_IDLE;
+            moe_aggregate_addr_r <= {ADDR_WIDTH{1'b0}};
+            moe_aggregate_payload_r <= {PAYLOAD_ITEM_WIDTH{1'b0}};
+            moe_aggregate_old_r <= {PAYLOAD_ITEM_WIDTH{1'b0}};
+            moe_aggregate_query_active_r <= 1'b0;
+            moe_aggregate_update_done <= 1'b0;
+            moe_aggregate_update_sum_dbg <= {PAYLOAD_ITEM_WIDTH{1'b0}};
+            moe_aggregate_query_done <= 1'b0;
+            moe_aggregate_query_data <= {PAYLOAD_ITEM_WIDTH{1'b0}};
+        end
+        else begin
+            moe_aggregate_update_done <= 1'b0;
+            moe_aggregate_query_done <= 1'b0;
+
+            case (moe_aggregate_state)
+                MOE_AGG_IDLE: begin
+                    if (moe_aggregate_update_valid && moe_aggregate_update_ready) begin
+                        moe_aggregate_addr_r <= moe_aggregate_update_addr;
+                        moe_aggregate_payload_r <= moe_aggregate_update_data;
+                        moe_aggregate_query_active_r <= 1'b0;
+                        moe_aggregate_state <= MOE_AGG_READ_REQ;
+                    end
+                    else if (moe_aggregate_query_valid && moe_aggregate_query_ready) begin
+                        moe_aggregate_addr_r <= moe_aggregate_query_addr;
+                        moe_aggregate_payload_r <= {PAYLOAD_ITEM_WIDTH{1'b0}};
+                        moe_aggregate_query_active_r <= 1'b1;
+                        moe_aggregate_state <= MOE_AGG_READ_REQ;
+                    end
+                end
+
+                MOE_AGG_READ_REQ: begin
+                    if (aggregate_bram_arb_to_moe_rd_grant) begin
+                        moe_aggregate_state <= MOE_AGG_WAIT_READ;
+                    end
+                end
+
+                MOE_AGG_WAIT_READ: begin
+                    if (moe_aggregate_query_active_r) begin
+                        moe_aggregate_query_data <= moe_aggregate_rd_item0;
+                        moe_aggregate_state <= MOE_AGG_QUERY_DONE;
+                    end
+                    else begin
+                        moe_aggregate_old_r <= moe_aggregate_rd_item0;
+                        moe_aggregate_state <= MOE_AGG_WRITE_REQ;
+                    end
+                end
+
+                MOE_AGG_WRITE_REQ: begin
+                    if (aggregate_bram_arb_to_moe_wr_grant) begin
+                        moe_aggregate_update_sum_dbg <= moe_aggregate_sum_comb;
+                        moe_aggregate_state <= MOE_AGG_DONE;
+                    end
+                end
+
+                MOE_AGG_DONE: begin
+                    moe_aggregate_update_done <= 1'b1;
+                    moe_aggregate_state <= MOE_AGG_IDLE;
+                end
+
+                MOE_AGG_QUERY_DONE: begin
+                    moe_aggregate_query_done <= 1'b1;
+                    moe_aggregate_query_active_r <= 1'b0;
+                    moe_aggregate_state <= MOE_AGG_IDLE;
+                end
+
+                default: begin
+                    moe_aggregate_query_active_r <= 1'b0;
+                    moe_aggregate_state <= MOE_AGG_IDLE;
+                end
+            endcase
+        end
+    end
+
+    assign moe_arrival_update_ready = (moe_arrival_state == MOE_ARR_IDLE);
+    assign moe_arrival_lane_mask =
+        (moe_arrival_lane_id_r < DATA_WIDTH) ?
+        ({ {(DATA_WIDTH-1){1'b0}}, 1'b1 } << moe_arrival_lane_id_r) :
+        {DATA_WIDTH{1'b0}};
+    assign moe_arrival_next_bitmap = moe_arrival_old_bitmap_r | moe_arrival_lane_mask;
+    assign moe_to_arrival_arb_rd_en = (moe_arrival_state == MOE_ARR_READ_REQ);
+    assign moe_to_arrival_arb_rd_addr = moe_arrival_addr_r;
+    assign moe_to_arrival_arb_wr_en = (moe_arrival_state == MOE_ARR_WRITE_REQ);
+    assign moe_to_arrival_arb_wr_addr = moe_arrival_addr_r;
+    assign moe_to_arrival_arb_wr_data = moe_arrival_next_bitmap;
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            moe_arrival_state <= MOE_ARR_IDLE;
+            moe_arrival_addr_r <= {ADDR_WIDTH{1'b0}};
+            moe_arrival_lane_id_r <= 6'd0;
+            moe_arrival_old_bitmap_r <= {DATA_WIDTH{1'b0}};
+            moe_arrival_update_done <= 1'b0;
+            moe_arrival_update_bitmap_dbg <= {DATA_WIDTH{1'b0}};
+        end
+        else begin
+            moe_arrival_update_done <= 1'b0;
+
+            case (moe_arrival_state)
+                MOE_ARR_IDLE: begin
+                    if (moe_arrival_update_valid && moe_arrival_update_ready) begin
+                        moe_arrival_addr_r <= moe_arrival_update_addr;
+                        moe_arrival_lane_id_r <= moe_arrival_update_lane_id;
+                        moe_arrival_state <= MOE_ARR_READ_REQ;
+                    end
+                end
+
+                MOE_ARR_READ_REQ: begin
+                    if (arrival_arb_to_moe_rd_grant3) begin
+                        moe_arrival_state <= MOE_ARR_WAIT_READ;
+                    end
+                end
+
+                MOE_ARR_WAIT_READ: begin
+                    moe_arrival_old_bitmap_r <= allreduce_arrival_state_rd_data;
+                    moe_arrival_state <= MOE_ARR_WRITE_REQ;
+                end
+
+                MOE_ARR_WRITE_REQ: begin
+                    if (arrival_arb_to_moe_wr_grant4) begin
+                        moe_arrival_update_bitmap_dbg <= moe_arrival_next_bitmap;
+                        moe_arrival_state <= MOE_ARR_DONE;
+                    end
+                end
+
+                MOE_ARR_DONE: begin
+                    moe_arrival_update_done <= 1'b1;
+                    moe_arrival_state <= MOE_ARR_IDLE;
+                end
+
+                default: begin
+                    moe_arrival_state <= MOE_ARR_IDLE;
+                end
+            endcase
+        end
+    end
 
     genvar j;
     generate
@@ -654,6 +904,9 @@ module aggregator_core_top #(
             wire [PAYLOAD_ITEM_WIDTH-1:0] sloter_item_j;
             assign sloter_item_j = sloter_to_aggregate_bram_arb_wr_vector_pack[PAYLOAD_ITEM_WIDTH*(j+1)-1 -: PAYLOAD_ITEM_WIDTH];
 
+            wire [PAYLOAD_ITEM_WIDTH-1:0] moe_item_j;
+            assign moe_item_j = moe_to_aggregate_bram_arb_wr_vector_pack[PAYLOAD_ITEM_WIDTH*(j+1)-1 -: PAYLOAD_ITEM_WIDTH];
+
             // chunk_a (aggregate_bram rd_data) is double-registered to match
             // the 2-cycle payload pipeline above, so chunk_a and chunk_b
             // arrive at the adder in the same cycle.
@@ -688,8 +941,10 @@ module aggregator_core_top #(
             // grant signals are 1-bit, so this mux has tiny fanout per BRAM.
             wire [PAYLOAD_ITEM_WIDTH-1:0] aggregate_bram_wr_data_local;
             assign aggregate_bram_wr_data_local = aggregate_bram_arb_to_sloter_wr_grant
-                                                  ? sloter_item_j
-                                                  : buffer_wr_data_local;
+                                                  ? sloter_item_j :
+                                                  aggregate_bram_arb_to_moe_wr_grant
+                                                  ? moe_item_j :
+                                                  buffer_wr_data_local;
 
             payload_bram #(
                 .USE_LUTRAM(0),
@@ -787,6 +1042,40 @@ module aggregator_core_top #(
     localparam BUFFER_FOWARDING = 2'b10;
 
     reg [1:0]   arb_current_state, arb_next_state;
+    wire                        forwarding_in_valid;
+    wire [ADDR_WIDTH-1:0]       forwarding_in_addr;
+    wire [DATA_WIDTH-1:0]       forwarding_in_data;
+
+    localparam DOWN_BUFFER_REQ_BUS_WIDTH = METADATA_LEN + 1;
+    localparam UP_BUFFER_REQ_BUS_WIDTH = METADATA_LEN + 3;
+    localparam FORWARDING_CAPTURE_BUS_WIDTH = ADDR_WIDTH + DATA_WIDTH;
+
+    wire [DOWN_BUFFER_REQ_BUS_WIDTH-1:0] down_buffer_req_bus;
+    wire [DOWN_BUFFER_REQ_BUS_WIDTH-1:0] down_buffer_req_bus_holdfix;
+    wire [METADATA_LEN-1:0] down_buffer_metadata_holdfix;
+    wire down_buffer_copy_holdfix;
+
+    wire [UP_BUFFER_REQ_BUS_WIDTH-1:0] up_buffer_req_bus;
+    wire [UP_BUFFER_REQ_BUS_WIDTH-1:0] up_buffer_req_bus_holdfix;
+    wire [METADATA_LEN-1:0] up_buffer_metadata_holdfix;
+    wire up_buffer_aggregate_holdfix;
+    wire up_buffer_read_holdfix;
+    wire up_buffer_need_aggregator_holdfix;
+
+    wire [FORWARDING_CAPTURE_BUS_WIDTH-1:0] forwarding_capture_bus;
+    wire [FORWARDING_CAPTURE_BUS_WIDTH-1:0] forwarding_capture_bus_holdfix;
+    wire [ADDR_WIDTH-1:0] forwarding_capture_addr_holdfix;
+    wire [DATA_WIDTH-1:0] forwarding_capture_data_holdfix;
+    wire forwarding_capture_valid_holdfix;
+
+    reg                         store_forwarding_in_valid;
+    reg [ADDR_WIDTH-1:0]        store_forwarding_in_addr;
+    reg [DATA_WIDTH-1:0]        store_forwarding_in_data;
+
+    wire forwarding_release_hit;
+    wire buffer_wait_release;
+    wire buffer_forward_release;
+    wire buffer_release_to_controller;
 //--------------------------------------------------------------------------------
     // 1. 定义 Arbiter 自身状态 (只有 IDLE 才能接客)
     wire arb_is_idle = (arb_current_state == BUFFER_IDLE);
@@ -908,38 +1197,6 @@ module aggregator_core_top #(
     // -------------------------------------------------------
     // 关键：数据处理必须在时钟沿进行，这样才能生成寄存器
 
-    // ------speculation
-    wire                        forwarding_in_valid;
-    wire [ADDR_WIDTH-1:0]       forwarding_in_addr;
-    wire [DATA_WIDTH-1:0]       forwarding_in_data;
-
-    localparam DOWN_BUFFER_REQ_BUS_WIDTH = METADATA_LEN + 1;
-    localparam UP_BUFFER_REQ_BUS_WIDTH = METADATA_LEN + 3;
-    localparam FORWARDING_CAPTURE_BUS_WIDTH = ADDR_WIDTH + DATA_WIDTH;
-
-    wire [DOWN_BUFFER_REQ_BUS_WIDTH-1:0] down_buffer_req_bus;
-    wire [DOWN_BUFFER_REQ_BUS_WIDTH-1:0] down_buffer_req_bus_holdfix;
-    wire [METADATA_LEN-1:0] down_buffer_metadata_holdfix;
-    wire down_buffer_copy_holdfix;
-
-    wire [UP_BUFFER_REQ_BUS_WIDTH-1:0] up_buffer_req_bus;
-    wire [UP_BUFFER_REQ_BUS_WIDTH-1:0] up_buffer_req_bus_holdfix;
-    wire [METADATA_LEN-1:0] up_buffer_metadata_holdfix;
-    wire up_buffer_aggregate_holdfix;
-    wire up_buffer_read_holdfix;
-    wire up_buffer_need_aggregator_holdfix;
-
-    wire [FORWARDING_CAPTURE_BUS_WIDTH-1:0] forwarding_capture_bus;
-    wire [FORWARDING_CAPTURE_BUS_WIDTH-1:0] forwarding_capture_bus_holdfix;
-    wire [ADDR_WIDTH-1:0] forwarding_capture_addr_holdfix;
-    wire [DATA_WIDTH-1:0] forwarding_capture_data_holdfix;
-    wire forwarding_capture_valid_holdfix;
-
-    reg                         store_forwarding_in_valid;
-    reg [ADDR_WIDTH-1:0]        store_forwarding_in_addr;
-    reg [DATA_WIDTH-1:0]        store_forwarding_in_data;
-    // ------
-
     assign down_buffer_req_bus = {
         down_broadcast_to_buffer_metadata_out,
         down_broadcast_to_buffer_copy_buffer_en
@@ -1011,15 +1268,15 @@ module aggregator_core_top #(
         .O(forwarding_capture_valid_holdfix)
     );
 
-    wire forwarding_release_hit =
+    assign forwarding_release_hit =
         forwarding_in_valid &&
         forwarding_in_data[FAN_IN] &&
         (forwarding_in_addr == store_merged_buffer_metadata_in[15:8]);
-    wire buffer_wait_release = (arb_current_state == BUFFER_WAIT) && payload_write_done;
-    wire buffer_forward_release =
+    assign buffer_wait_release = (arb_current_state == BUFFER_WAIT) && payload_write_done;
+    assign buffer_forward_release =
         (arb_current_state == BUFFER_FOWARDING) &&
         (forwarding_release_hit || store_real_to_buffer_need_aggregator_for_port_retrans);
-    wire buffer_release_to_controller = buffer_wait_release || buffer_forward_release;
+    assign buffer_release_to_controller = buffer_wait_release || buffer_forward_release;
 
     assign merged_buffer_metadata_in = store_merged_buffer_metadata_in;
     assign merged_buffer_aggregate_payload_en = buffer_release_to_controller && store_merged_buffer_aggregate_payload_en;
@@ -1199,7 +1456,7 @@ module aggregator_core_top #(
         .PAYLOAD_ITEM_NUM(PAYLOAD_ITEM_NUM),
         .PAYLOAD_ITEM_WIDTH(PAYLOAD_ITEM_WIDTH),
         .PAYLOAD_ITEM_COUNT_WIDTH(PAYLOAD_ITEM_COUNT_WIDTH),
-        .SLOTS_WIDTH(RING_SLOT_WIDTH),
+        .SLOTS_WIDTH(ADDR_WIDTH),
         .BUFFER_SLOTS(BUFFER_SLOTS),
         .METADATA_LEN(METADATA_LEN)      
     )allreduce_aggregate_buffer_controller (
@@ -1344,8 +1601,11 @@ module aggregator_core_top #(
     ) allreduce_sloter (
         .clk(clk),
         .rst_n(rst_n),
-        .new_slot_en(up_broadcast_to_sloter_new_slot_en),
-        .in_metadata(up_broadcast_to_sloter_metadata_out),
+        .new_slot_en(sloter_new_slot_en),
+        .in_valid(1'b1),
+        .in_metadata(sloter_metadata_in),
+        .new_slot_addr_override(sloter_addr_override),
+        .new_slot_addr_override_en(sloter_addr_override_en),
         // .in_valid(up_broadcast_output_valid),
 
         .new_arrival_state_wr_en(sloter_to_arrival_arb_wr_en),
@@ -1423,6 +1683,10 @@ module aggregator_core_top #(
         .req1_rd_addr(buffer_to_aggregate_bram_arb_rd_addr),
         .grant1(aggregate_bram_arb_to_buffer_rd_grant),
 
+        .req2_rd_en(moe_to_aggregate_bram_arb_rd_en_pack),
+        .req2_rd_addr(moe_to_aggregate_bram_arb_rd_addr),
+        .grant2(aggregate_bram_arb_to_moe_rd_grant),
+
         .payload_rd_en(aggregate_bram_rd_en_pack),
         .payload_rd_addr(aggregate_bram_rd_addr_pack)
     );
@@ -1445,6 +1709,11 @@ module aggregator_core_top #(
         .req1_wr_addr(buffer_to_aggregate_bram_arb_wr_addr),
         .req1_wr_data_pack(buffer_to_aggregate_bram_arb_wr_vector_pack),
         .grant1(aggregate_bram_arb_to_buffer_wr_grant),
+
+        .req2_wr_en(moe_to_aggregate_bram_arb_wr_en_pack),
+        .req2_wr_addr(moe_to_aggregate_bram_arb_wr_addr),
+        .req2_wr_data_pack(moe_to_aggregate_bram_arb_wr_vector_pack),
+        .grant2(aggregate_bram_arb_to_moe_wr_grant),
 
         .payload_wr_data_pack(aggregate_bram_wr_data_pack),
         .payload_wr_addr(aggregate_bram_wr_addr_pack),
@@ -1471,6 +1740,10 @@ module aggregator_core_top #(
         .req2_rd_en(up_retrans_to_arrival_arb_rd_en),
         .req2_rd_addr(up_retrans_to_arrival_arb_rd_addr),
         .grant2(arrival_arb_to_up_retrans_rd_grant2),
+
+        .req3_rd_en(moe_to_arrival_arb_rd_en),
+        .req3_rd_addr(moe_to_arrival_arb_rd_addr),
+        .grant3(arrival_arb_to_moe_rd_grant3),
 
         .bram_rd_en(allreduce_arrival_state_rd_en),
         .bram_rd_addr(allreduce_arrival_state_rd_addr)
@@ -1503,6 +1776,11 @@ module aggregator_core_top #(
         .req3_wr_addr(up_retrans_to_arrival_arb_wr_addr),
         .req3_wr_data(up_retrans_to_arrival_arb_wr_data),
         .grant3(arrival_arb_to_up_retrans_wr_grant3),
+
+        .req4_wr_en(moe_to_arrival_arb_wr_en),
+        .req4_wr_addr(moe_to_arrival_arb_wr_addr),
+        .req4_wr_data(moe_to_arrival_arb_wr_data),
+        .grant4(arrival_arb_to_moe_wr_grant4),
 
         .bram_wr_en(allreduce_arrival_state_wr_en),
         .bram_wr_addr(allreduce_arrival_state_wr_addr),
@@ -1550,6 +1828,14 @@ module aggregator_core_top #(
         .req1_rd_addr(up_retrans_to_degree_arb_rd_addr),
         .grant1(degree_arb_to_up_retrans_rd_grant1),
 
+        .req2_rd_en(1'b0),
+        .req2_rd_addr({ADDR_WIDTH{1'b0}}),
+        .grant2(),
+
+        .req3_rd_en(1'b0),
+        .req3_rd_addr({ADDR_WIDTH{1'b0}}),
+        .grant3(),
+
         .bram_rd_en(allreduce_degree_state_rd_en),
         .bram_rd_addr(allreduce_degree_state_rd_addr)
     );
@@ -1562,9 +1848,9 @@ module aggregator_core_top #(
         .clk(clk),
         .rst_n(rst_n),
 
-        .req0_wr_en(),
-        .req0_wr_addr(),
-        .req0_wr_data(),
+        .req0_wr_en(1'b0),
+        .req0_wr_addr({ADDR_WIDTH{1'b0}}),
+        .req0_wr_data({DATA_WIDTH{1'b0}}),
         .grant0(),
 
         .req1_wr_en(sloter_to_degree_arb_wr_en),
@@ -1572,15 +1858,20 @@ module aggregator_core_top #(
         .req1_wr_data(sloter_to_degree_arb_wr_data),
         .grant1(degree_arb_to_sloter_wr_grant1),
 
-        .req2_wr_en(up_broadcast_to_degree_arb_wr_en),
-        .req2_wr_addr(up_broadcast_to_degree_arb_wr_addr),
-        .req2_wr_data(up_broadcast_to_degree_arb_wr_data),
-        .grant2(degree_arb_to_up_broadcast_wr_grant2),
+        .req2_wr_en(1'b0),
+        .req2_wr_addr({ADDR_WIDTH{1'b0}}),
+        .req2_wr_data({DATA_WIDTH{1'b0}}),
+        .grant2(),
 
         .req3_wr_en(up_retrans_to_degree_arb_wr_en),
         .req3_wr_addr(up_retrans_to_degree_arb_wr_addr),
         .req3_wr_data(up_retrans_to_degree_arb_wr_data),
         .grant3(degree_arb_to_up_retrans_wr_grant3),
+
+        .req4_wr_en(1'b0),
+        .req4_wr_addr({ADDR_WIDTH{1'b0}}),
+        .req4_wr_data({DATA_WIDTH{1'b0}}),
+        .grant4(),
 
         .bram_wr_en(allreduce_degree_state_wr_en),
         .bram_wr_addr(allreduce_degree_state_wr_addr),
@@ -1721,7 +2012,7 @@ module aggregator_core_top #(
 
     // Pipe-stage flow control: accept comb mux when empty; drain into skid
     // whenever skid is empty.
-    wire pipe_can_accept = !pipe_valid;
+    assign pipe_can_accept = !pipe_valid;
     wire pipe_drain      = pipe_valid && !skid_valid;
     wire pipe_push       = pipe_can_accept && skid_src_valid;
 

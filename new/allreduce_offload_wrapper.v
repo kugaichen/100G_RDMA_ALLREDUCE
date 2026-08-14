@@ -91,6 +91,7 @@ module allreduce_offload_wrapper #(
     // ============================================================
     wire [DATA_W-1:0] ar_m_tdata;
     wire [KEEP_W-1:0] ar_m_tkeep;
+    wire [TUSER_W-1:0] ar_m_tuser;
     wire              ar_m_tvalid;
     wire              ar_m_tlast;
     wire [2:0]        ar_m_route_type;
@@ -107,6 +108,7 @@ module allreduce_offload_wrapper #(
         .s_axis_tready           (s_axis_tready),
         .m_axis_tdata            (ar_m_tdata),
         .m_axis_tkeep            (ar_m_tkeep),
+        .m_axis_tuser            (ar_m_tuser),
         .m_axis_tvalid           (ar_m_tvalid),
         .m_axis_tlast            (ar_m_tlast),
         .m_axis_tready           (m_axis_tready),
@@ -153,6 +155,8 @@ module allreduce_offload_wrapper #(
     always @(*) begin
         if (!ar_m_is_aggregated) begin
             m_axis_tuser = latched_tuser;
+        end else if (ar_m_tuser[32]) begin
+            m_axis_tuser = ar_m_tuser;
         end else begin
             m_axis_tuser = latched_tuser;
             m_axis_tuser[32] = 1'b1;

@@ -34,6 +34,10 @@ module payload_read_arbiter #(
     input wire [PAYLOAD_ITEM_NUM-1:0]                               req1_rd_en,
     input wire [ADDR_WIDTH-1:0]                                     req1_rd_addr,
     output reg                                                      grant1,
+
+    input wire [PAYLOAD_ITEM_NUM-1:0]                               req2_rd_en,
+    input wire [ADDR_WIDTH-1:0]                                     req2_rd_addr,
+    output reg                                                      grant2,
     
     output reg [PAYLOAD_ITEM_NUM-1:0]                              payload_rd_en,
     output reg [ADDR_WIDTH-1:0]                                    payload_rd_addr
@@ -49,6 +53,7 @@ module payload_read_arbiter #(
     // 辅助信号：检测是否有任意一位为高
     wire req0_active = |req0_rd_en;
     wire req1_active = |req1_rd_en;
+    wire req2_active = |req2_rd_en;
 
 
     always @(posedge clk or negedge rst_n) begin
@@ -62,6 +67,7 @@ module payload_read_arbiter #(
             IDLE: begin
                 if (req0_active) next_state = READ;
                 else if (req1_active) next_state = READ;
+                else if (req2_active) next_state = READ;
             end
             READ: begin
                 next_state = IDLE;
@@ -76,6 +82,7 @@ module payload_read_arbiter #(
             payload_rd_addr <= 0;
             grant0 <= 0;
             grant1 <= 0;
+            grant2 <= 0;
         end
         else begin
             case (state)
@@ -83,6 +90,7 @@ module payload_read_arbiter #(
                     payload_rd_en <= 0;
                     grant0 <= 0;
                     grant1 <= 0;
+                    grant2 <= 0;
 
                     if (req0_active) begin
                         payload_rd_en <= req0_rd_en; // 锁存请求向量
@@ -94,6 +102,11 @@ module payload_read_arbiter #(
                         payload_rd_addr <= req1_rd_addr;
                         grant1 <= 1;
                     end
+                    else if (req2_active) begin
+                        payload_rd_en <= req2_rd_en;
+                        payload_rd_addr <= req2_rd_addr;
+                        grant2 <= 1;
+                    end
                 end
 
                 READ: begin
@@ -101,6 +114,7 @@ module payload_read_arbiter #(
                     payload_rd_en <= 0;
                     grant0 <= 0;
                     grant1 <= 0;
+                    grant2 <= 0;
                 end
             endcase
         end

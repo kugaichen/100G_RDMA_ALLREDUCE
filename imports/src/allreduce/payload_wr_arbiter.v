@@ -38,6 +38,11 @@ module payload_wr_arbiter #(
     input wire [PAYLOAD_ITEM_NUM*PAYLOAD_ITEM_WIDTH-1:0]        req1_wr_data_pack,
     output reg                                                  grant1,
 
+    input wire [PAYLOAD_ITEM_NUM-1:0]                           req2_wr_en,
+    input wire [ADDR_WIDTH-1:0]                                 req2_wr_addr,
+    input wire [PAYLOAD_ITEM_NUM*PAYLOAD_ITEM_WIDTH-1:0]        req2_wr_data_pack,
+    output reg                                                  grant2,
+
     output wire [PAYLOAD_ITEM_NUM*PAYLOAD_ITEM_WIDTH-1:0]       payload_wr_data_pack,
     // output wire [ADDR_WIDTH-1:0]                                payload_wr_addr,
     // output wire [PAYLOAD_ITEM_NUM-1:0]                          payload_wr_en
@@ -54,9 +59,10 @@ module payload_wr_arbiter #(
     // 辅助信号：检测是否有请求
     wire req0_active = |req0_wr_en;
     wire req1_active = |req1_wr_en;
+    wire req2_active = |req2_wr_en;
 
     // 关键：锁存“当前选中了谁”，用于驱动组合逻辑的数据 MUX
-    // 0: None, 1: Req0, 2: Req1
+    // 0: None, 1: Req0, 2: Req1, 3: Req2
     reg [1:0] sel_req; 
 
 
@@ -73,6 +79,7 @@ module payload_wr_arbiter #(
             IDLE: begin
                 if (req0_active) next_state = WRITE;
                 else if (req1_active) next_state = WRITE;
+                else if (req2_active) next_state = WRITE;
             end
             WRITE: begin
                 next_state = IDLE;
@@ -87,6 +94,7 @@ module payload_wr_arbiter #(
             payload_wr_addr <= 0;
             grant0 <= 0;
             grant1 <= 0;
+            grant2 <= 0;
             sel_req <= 0;
         end
         else begin
@@ -95,6 +103,7 @@ module payload_wr_arbiter #(
                     payload_wr_en <= 0;
                     grant0 <= 0;
                     grant1 <= 0;
+                    grant2 <= 0;
                     sel_req <= 0; // 默认不选
 
                     if (req0_active) begin
@@ -109,6 +118,12 @@ module payload_wr_arbiter #(
                         grant1 <= 1;
                         sel_req <= 2; // 记录选中了 Req1
                     end
+                    else if (req2_active) begin
+                        payload_wr_en <= req2_wr_en;
+                        payload_wr_addr <= req2_wr_addr;
+                        grant2 <= 1;
+                        sel_req <= 3;
+                    end
                 end
 
                 WRITE: begin
@@ -116,6 +131,7 @@ module payload_wr_arbiter #(
                     payload_wr_en <= 0;
                     grant0 <= 0;
                     grant1 <= 0;
+                    grant2 <= 0;
                     // sel_req 保持不变，或者在这里清零也可以，
                     // 但为了数据稳定，建议保持直到回到 IDLE
                 end
@@ -124,7 +140,8 @@ module payload_wr_arbiter #(
     end
 
     assign payload_wr_data_pack = (sel_req == 1) ? req0_wr_data_pack :
-                                  (sel_req == 2) ? req1_wr_data_pack : 
+                                  (sel_req == 2) ? req1_wr_data_pack :
+                                  (sel_req == 3) ? req2_wr_data_pack :
                                   {(PAYLOAD_ITEM_NUM*PAYLOAD_ITEM_WIDTH){1'b0}};
 
 

@@ -63,6 +63,8 @@ module sloter_bram_arbiter_top #(
         .rst_n(rst_n),
         .new_slot_en(new_slot_en),
         .in_metadata(in_metadata),
+        .new_slot_addr_override({ADDR_WIDTH{1'b0}}),
+        .new_slot_addr_override_en(1'b0),
         .in_valid(in_valid),
         .in_ready(in_ready),
 

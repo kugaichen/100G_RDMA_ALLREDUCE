@@ -47,6 +47,11 @@ module bram_write_arbiter#(
     input wire [DATA_WIDTH-1:0]     req3_wr_data,
     output reg                      grant3,
 
+    input wire                      req4_wr_en,
+    input wire [ADDR_WIDTH-1:0]     req4_wr_addr,
+    input wire [DATA_WIDTH-1:0]     req4_wr_data,
+    output reg                      grant4,
+
     output reg                      bram_wr_en,
     output reg [ADDR_WIDTH-1:0]     bram_wr_addr,
     output reg [DATA_WIDTH-1:0]     bram_wr_data
@@ -84,6 +89,7 @@ module bram_write_arbiter#(
                 else if (req1_wr_en) next_state = WRITE;
                 else if (req2_wr_en) next_state = WRITE;
                 else if (req3_wr_en) next_state = WRITE;
+                else if (req4_wr_en) next_state = WRITE;
             end
 
             WRITE: begin
@@ -102,6 +108,7 @@ module bram_write_arbiter#(
             grant1 <= 0;
             grant2 <= 0;
             grant3 <= 0;
+            grant4 <= 0;
         end
         else begin
             case (state)
@@ -111,6 +118,7 @@ module bram_write_arbiter#(
                     grant1 <= 0;
                     grant2 <= 0;
                     grant3 <= 0;
+                    grant4 <= 0;
 
                     // 在 IDLE 状态下捕获请求并锁存数据
                     if (req0_wr_en) begin
@@ -137,6 +145,12 @@ module bram_write_arbiter#(
                         bram_wr_data <= req3_wr_data;
                         grant3 <= 1;
                     end
+                    else if (req4_wr_en) begin
+                        bram_wr_en <= 1;
+                        bram_wr_addr <= req4_wr_addr;
+                        bram_wr_data <= req4_wr_data;
+                        grant4 <= 1;
+                    end
                 end
 
                 WRITE: begin
@@ -148,6 +162,7 @@ module bram_write_arbiter#(
                     grant1 <= 0;
                     grant2 <= 0;
                     grant3 <= 0;
+                    grant4 <= 0;
                 end
             endcase
         end

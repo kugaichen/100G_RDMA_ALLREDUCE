@@ -39,6 +39,10 @@ module bram_read_arbiter #(
     input wire [ADDR_WIDTH-1:0]     req2_rd_addr,
     output reg                      grant2,
 
+    input wire                      req3_rd_en,
+    input wire [ADDR_WIDTH-1:0]     req3_rd_addr,
+    output reg                      grant3,
+
     output reg                      bram_rd_en,
     output reg [ADDR_WIDTH-1:0]     bram_rd_addr
     
@@ -67,6 +71,7 @@ module bram_read_arbiter #(
                 if (req0_rd_en) next_state = READ;
                 else if (req1_rd_en) next_state = READ;
                 else if (req2_rd_en) next_state = READ;
+                else if (req3_rd_en) next_state = READ;
             end
 
             READ: begin
@@ -82,6 +87,7 @@ module bram_read_arbiter #(
             grant0 <= 0;
             grant1 <= 0;
             grant2 <= 0;
+            grant3 <= 0;
         end
 
         else begin
@@ -91,6 +97,7 @@ module bram_read_arbiter #(
                     grant0 <= 0;
                     grant1 <= 0;
                     grant2 <= 0;
+                    grant3 <= 0;
                 
 
                     if (req0_rd_en) begin
@@ -108,6 +115,11 @@ module bram_read_arbiter #(
                         bram_rd_addr <= req2_rd_addr;
                         grant2 <= 1;
                     end
+                    else if (req3_rd_en) begin
+                        bram_rd_en <= 1;
+                        bram_rd_addr <= req3_rd_addr;
+                        grant3 <= 1;
+                    end
                 end 
                 
                 READ: begin
@@ -115,6 +127,7 @@ module bram_read_arbiter #(
                     grant0 <= 0;
                     grant1 <= 0;
                     grant2 <= 0;
+                    grant3 <= 0;
                 end
             endcase
         end

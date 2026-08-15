@@ -197,7 +197,8 @@ module deparser#(
     // 功能安全：header 比 payload 早到达，多 1 拍不影响时序关系。
     reg [PKT_HDR_LEN-1:0]          header_in_r;
     reg                            header_valid_r;
-    reg [7:0]                      metadata_slot_r;
+    reg [7:0]                      metadata_slot_full_r;
+    reg [HEADER_SLOT_WIDTH-1:0]    metadata_slot_r;
     // AETH 也打 1 拍, 与 header_valid_r 时序对齐
     reg [7:0]                      aeth_syndrome_r;
     reg [23:0]                     aeth_msn_r;
@@ -206,13 +207,15 @@ module deparser#(
         if (!rst_n) begin
             header_in_r    <= {PKT_HDR_LEN{1'b0}};
             header_valid_r <= 1'b0;
-            metadata_slot_r <= 8'd0;
+            metadata_slot_full_r <= 8'd0;
+            metadata_slot_r <= {HEADER_SLOT_WIDTH{1'b0}};
             aeth_syndrome_r <= 8'h00;
             aeth_msn_r <= 24'h000000;
         end else begin
             header_in_r    <= from_parser_header_in;
             header_valid_r <= from_parser_header_valid;
-            metadata_slot_r <= from_parser_metadata_in[15:8];
+            metadata_slot_full_r <= from_parser_metadata_in[15:8];
+            metadata_slot_r <= from_parser_metadata_in[8 +: HEADER_SLOT_WIDTH];
             aeth_syndrome_r <= from_parser_aeth_syndrome_in;
             aeth_msn_r <= from_parser_aeth_msn_in;
         end
@@ -238,7 +241,7 @@ module deparser#(
     assign dbg_current_state        = current_state;
     assign dbg_header_v_at_agg_slot = header_v[from_agg_metadata_in[15:8]];
     assign dbg_from_agg_slot        = from_agg_metadata_in[15:8];
-    assign dbg_parser_slot_r        = metadata_slot_r;
+    assign dbg_parser_slot_r        = metadata_slot_full_r;
     assign dbg_header_valid_r       = header_valid_r;
     assign dbg_agg_req_valid        = agg_req_valid;
         

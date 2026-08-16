@@ -17,6 +17,7 @@ module moe_slot_request_adapter #(
     output wire slot_req_valid,
     output reg [2:0] slot_req_kind,
     output wire [OWNER_WIDTH-1:0] slot_owner_rank,
+    output wire [7:0] slot_op_arg,
     output wire [7:0] slot_flags,
     output wire [GLOBAL_SEQ_WIDTH-1:0] slot_global_seq,
     output wire [GLOBAL_SEQ_WIDTH-1:0] slot_token_id,
@@ -39,15 +40,16 @@ module moe_slot_request_adapter #(
                      (embedded_op_type == desc_op_type);
 
     assign slot_owner_rank = desc_in[95:88];
-    assign slot_flags = desc_in[87:80];
+    assign slot_op_arg = desc_in[87:80];
+    assign slot_flags = slot_op_arg;
     assign slot_global_seq = desc_in[79:48];
     assign slot_token_id = desc_in[79:48];
     assign slot_psn = desc_in[47:16];
     assign slot_ingress_id = desc_in[15:8];
     assign slot_psn_mod = desc_in[7:0];
-    assign slot_expected_bitmap = {{(EXPECTED_BITMAP_WIDTH-8){1'b0}}, slot_flags};
-    assign slot_route_mask = slot_flags[ROUTE_MASK_WIDTH-1:0];
-    assign slot_lane_id = slot_flags[5:0];
+    assign slot_expected_bitmap = {{(EXPECTED_BITMAP_WIDTH-8){1'b0}}, slot_op_arg};
+    assign slot_route_mask = slot_op_arg[ROUTE_MASK_WIDTH-1:0];
+    assign slot_lane_id = slot_op_arg[5:0];
 
     assign is_dispatch = slot_req_valid &&
                          (desc_op_type == `MOE_OP_DISPATCH);

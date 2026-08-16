@@ -4,7 +4,13 @@ module allreduce_offload_wrapper #(
     parameter DATA_W    = 512,
     parameter KEEP_W    = 64,
     parameter TUSER_W   = 128,
-    parameter NUM_PORTS = 4
+    parameter NUM_PORTS = 4,
+    parameter ENABLE_MOE_COMBINE = 0,
+    parameter MOE_WINDOW_SIZE = 8,
+    parameter MOE_USE_REAL_PAYLOAD = 0,
+    parameter ENABLE_MOE_DISPATCH_INIT = 0,
+    parameter ENABLE_MOE_DISPATCH_EGRESS = 0,
+    parameter [15:0] MOE_EXPERT_PORT_MASK_FLAT = 16'h0201
 )(
     input wire  clk,
     input wire  rst_n,
@@ -98,7 +104,14 @@ module allreduce_offload_wrapper #(
     wire              ar_m_is_aggregated;
     wire [7:0]        ar_m_agg_ingress_port;
 
-    allreduce_offload_top u_allreduce (
+    allreduce_offload_top #(
+        .ENABLE_MOE_COMBINE(ENABLE_MOE_COMBINE),
+        .MOE_WINDOW_SIZE(MOE_WINDOW_SIZE),
+        .MOE_USE_REAL_PAYLOAD(MOE_USE_REAL_PAYLOAD),
+        .ENABLE_MOE_DISPATCH_INIT(ENABLE_MOE_DISPATCH_INIT),
+        .ENABLE_MOE_DISPATCH_EGRESS(ENABLE_MOE_DISPATCH_EGRESS),
+        .MOE_EXPERT_PORT_MASK_FLAT(MOE_EXPERT_PORT_MASK_FLAT)
+    ) u_allreduce (
         .clk                     (clk),
         .rst_n                   (rst_n),
         .s_axis_tdata            (s_axis_tdata),

@@ -89,7 +89,8 @@ module allreduce_offload_top#(
     parameter MOE_WINDOW_SIZE           = 8,
     parameter MOE_USE_REAL_PAYLOAD      = 0,
     parameter ENABLE_MOE_DISPATCH_INIT  = 0,
-    parameter ENABLE_MOE_DISPATCH_EGRESS = 0
+    parameter ENABLE_MOE_DISPATCH_EGRESS = 0,
+    parameter [15:0] MOE_EXPERT_PORT_MASK_FLAT = 16'h0201
 
 )(
 
@@ -244,6 +245,7 @@ module allreduce_offload_top#(
     wire                                                        slot_req_valid;
     wire [2:0]                                                  slot_req_kind;
     wire [7:0]                                                  slot_req_owner_rank;
+    wire [7:0]                                                  slot_req_op_arg;
     wire [7:0]                                                  slot_req_flags;
     wire [31:0]                                                 slot_req_global_seq;
     wire [31:0]                                                 slot_req_token_id;
@@ -329,7 +331,7 @@ module allreduce_offload_top#(
     reg [511:0]                                                 moe_payload_data_r;
     reg                                                         moe_dispatch_desc_pending;
     reg [7:0]                                                   moe_dispatch_owner_rank_pending;
-    reg [7:0]                                                   moe_dispatch_flags_pending;
+    reg [7:0]                                                   moe_dispatch_expert_bitmap_pending;
     reg [31:0]                                                  moe_dispatch_global_seq_pending;
     reg [31:0]                                                  moe_dispatch_psn_pending;
     reg                                                         moe_dispatch_payload_pending;
@@ -374,6 +376,7 @@ module allreduce_offload_top#(
         .slot_req_valid(slot_req_valid),
         .slot_req_kind(slot_req_kind),
         .slot_owner_rank(slot_req_owner_rank),
+        .slot_op_arg(slot_req_op_arg),
         .slot_flags(slot_req_flags),
         .slot_global_seq(slot_req_global_seq),
         .slot_token_id(slot_req_token_id),
@@ -477,7 +480,7 @@ module allreduce_offload_top#(
             moe_payload_data_r <= 512'd0;
             moe_dispatch_desc_pending <= 1'b0;
             moe_dispatch_owner_rank_pending <= 8'd0;
-            moe_dispatch_flags_pending <= 8'd0;
+            moe_dispatch_expert_bitmap_pending <= 8'd0;
             moe_dispatch_global_seq_pending <= 32'd0;
             moe_dispatch_psn_pending <= 32'd0;
             moe_dispatch_payload_pending <= 1'b0;
@@ -527,7 +530,7 @@ module allreduce_offload_top#(
                 (!moe_dispatch_desc_pending || moe_dispatch_egress_fire)) begin
                 moe_dispatch_desc_pending <= 1'b1;
                 moe_dispatch_owner_rank_pending <= slot_req_owner_rank;
-                moe_dispatch_flags_pending <= slot_req_route_mask;
+                moe_dispatch_expert_bitmap_pending <= slot_req_route_mask;
                 moe_dispatch_global_seq_pending <= slot_req_global_seq;
                 moe_dispatch_psn_pending <= slot_req_psn;
             end
@@ -1137,7 +1140,7 @@ module allreduce_offload_top#(
         .dispatch_ready(moe_dispatch_egress_ready),
         .dispatch_owner_rank(moe_dispatch_owner_rank_pending),
         .dispatch_global_seq(moe_dispatch_global_seq_pending),
-        .dispatch_expert_bitmap({56'd0, moe_dispatch_flags_pending}),
+        .dispatch_expert_bitmap({56'd0, moe_dispatch_expert_bitmap_pending}),
         .dispatch_payload_data(moe_dispatch_payload_data_r),
 
         .cfg_fpga_mac(cfg_my_mac_p0),
@@ -1151,7 +1154,7 @@ module allreduce_offload_top#(
         .cfg_expert1_ip(cfg_peer_ip_p1),
         .cfg_expert1_qp(cfg_peer_qp_p1),
         .cfg_expert1_udp_port(cfg_peer_port_p1),
-        .cfg_expert_port_mask_flat(16'h0201),
+        .cfg_expert_port_mask_flat(MOE_EXPERT_PORT_MASK_FLAT),
         .cfg_dispatch_psn(moe_dispatch_psn_pending + 32'd1),
 
         .m_axis_tdata(moe_dispatch_m_axis_tdata),

@@ -59,8 +59,37 @@ module moe_dispatch_egress_builder #(
     reg [OWNER_WIDTH-1:0] owner_rank_r;
     reg [GLOBAL_SEQ_WIDTH-1:0] global_seq_r;
     reg [EXPERT_BITMAP_WIDTH-1:0] expert_bitmap_r;
+    reg [EXPERT_BITMAP_WIDTH-1:0] remaining_bitmap_r;
+    reg [EXPERT_BITMAP_WIDTH-1:0] selected_expert_mask_r;
+    reg [7:0] selected_expert_id_r;
     reg [PAYLOAD_WIDTH-1:0] payload_data_r;
     reg [31:0] psn_r;
+
+    function [7:0] first_selected_expert;
+        input [EXPERT_BITMAP_WIDTH-1:0] expert_bitmap;
+        integer expert_idx;
+        reg found;
+        begin
+            first_selected_expert = 8'd0;
+            found = 1'b0;
+            for (expert_idx = 0; expert_idx < NUM_EXPERTS; expert_idx = expert_idx + 1) begin
+                if (!found && expert_bitmap[expert_idx]) begin
+                    first_selected_expert = expert_idx;
+                    found = 1'b1;
+                end
+            end
+        end
+    endfunction
+
+    function [EXPERT_BITMAP_WIDTH-1:0] expert_onehot;
+        input [7:0] expert_id;
+        begin
+            expert_onehot = {EXPERT_BITMAP_WIDTH{1'b0}};
+            if (expert_id < EXPERT_BITMAP_WIDTH) begin
+                expert_onehot = {{(EXPERT_BITMAP_WIDTH-1){1'b0}}, 1'b1} << expert_id;
+            end
+        end
+    endfunction
 
     function [PORT_MASK_WIDTH-1:0] select_expert_port_mask;
         input [EXPERT_BITMAP_WIDTH-1:0] expert_bitmap;
@@ -79,16 +108,16 @@ module moe_dispatch_egress_builder #(
     endfunction
 
     wire [PORT_MASK_WIDTH-1:0] selected_port_mask =
-        select_expert_port_mask(expert_bitmap_r, cfg_expert_port_mask_flat);
+        select_expert_port_mask(selected_expert_mask_r, cfg_expert_port_mask_flat);
 
     wire [47:0] dst_mac =
-        expert_bitmap_r[1] ? cfg_expert1_mac : cfg_expert0_mac;
+        (selected_expert_id_r == 8'd1) ? cfg_expert1_mac : cfg_expert0_mac;
     wire [31:0] dst_ip =
-        expert_bitmap_r[1] ? cfg_expert1_ip : cfg_expert0_ip;
+        (selected_expert_id_r == 8'd1) ? cfg_expert1_ip : cfg_expert0_ip;
     wire [23:0] dst_qp =
-        expert_bitmap_r[1] ? cfg_expert1_qp : cfg_expert0_qp;
+        (selected_expert_id_r == 8'd1) ? cfg_expert1_qp : cfg_expert0_qp;
     wire [15:0] dst_udp_port =
-        expert_bitmap_r[1] ? cfg_expert1_udp_port : cfg_expert0_udp_port;
+        (selected_expert_id_r == 8'd1) ? cfg_expert1_udp_port : cfg_expert0_udp_port;
 
     reg [ROCE_PAYLOAD_BITS-1:0] roce_payload;
     always @(*) begin
@@ -97,7 +126,7 @@ module moe_dispatch_egress_builder #(
         roce_payload[23:16] = 8'h01;
         roce_payload[31:24] = `MOE_OP_DISPATCH;
         roce_payload[39:32] = owner_rank_r;
-        roce_payload[47:40] = expert_bitmap_r[7:0];
+        roce_payload[47:40] = selected_expert_mask_r[7:0];
         roce_payload[79:48] = global_seq_r;
         roce_payload[80 +: PAYLOAD_WIDTH] = payload_data_r;
     end
@@ -210,6 +239,9 @@ module moe_dispatch_egress_builder #(
             owner_rank_r <= {OWNER_WIDTH{1'b0}};
             global_seq_r <= {GLOBAL_SEQ_WIDTH{1'b0}};
             expert_bitmap_r <= {EXPERT_BITMAP_WIDTH{1'b0}};
+            remaining_bitmap_r <= {EXPERT_BITMAP_WIDTH{1'b0}};
+            selected_expert_mask_r <= {EXPERT_BITMAP_WIDTH{1'b0}};
+            selected_expert_id_r <= 8'd0;
             payload_data_r <= {PAYLOAD_WIDTH{1'b0}};
             psn_r <= 32'd0;
             m_axis_tdata <= {AXIS_DATA_WIDTH{1'b0}};
@@ -229,10 +261,16 @@ module moe_dispatch_egress_builder #(
                         owner_rank_r <= dispatch_owner_rank;
                         global_seq_r <= dispatch_global_seq;
                         expert_bitmap_r <= dispatch_expert_bitmap;
+                        selected_expert_id_r <= first_selected_expert(dispatch_expert_bitmap);
+                        selected_expert_mask_r <= expert_onehot(first_selected_expert(dispatch_expert_bitmap));
+                        remaining_bitmap_r <= dispatch_expert_bitmap &
+                                              ~expert_onehot(first_selected_expert(dispatch_expert_bitmap));
                         payload_data_r <= dispatch_payload_data;
                         psn_r <= cfg_dispatch_psn;
                         payload_beat_count <= 4'd0;
-                        state <= S_HEADER;
+                        if (dispatch_expert_bitmap[NUM_EXPERTS-1:0] != {NUM_EXPERTS{1'b0}}) begin
+                            state <= S_HEADER;
+                        end
                     end
                 end
 
@@ -242,6 +280,7 @@ module moe_dispatch_egress_builder #(
                     m_axis_tuser[32] <= 1'b1;
                     m_axis_tuser[33] <= 1'b1;
                     m_axis_tuser[31:24] <= selected_port_mask;
+                    m_axis_tuser[23:16] <= 8'h01;
                     m_axis_tuser[15:0] <= ROCE_AXIS_PKT_BYTES;
 
                     if (m_axis_tvalid && m_axis_tready) begin
@@ -263,15 +302,25 @@ module moe_dispatch_egress_builder #(
                     m_axis_tuser[32] <= 1'b1;
                     m_axis_tuser[33] <= 1'b1;
                     m_axis_tuser[31:24] <= selected_port_mask;
+                    m_axis_tuser[23:16] <= 8'h01;
                     m_axis_tuser[15:0] <= ROCE_AXIS_PKT_BYTES;
 
                     if (m_axis_tvalid && m_axis_tready) begin
                         if (payload_beat_count == 4'd15) begin
-                            state <= S_IDLE;
                             payload_beat_count <= 4'd0;
                             m_axis_tvalid <= 1'b0;
                             m_axis_tlast <= 1'b0;
                             m_axis_tkeep <= {AXIS_KEEP_WIDTH{1'b0}};
+                            if (remaining_bitmap_r[NUM_EXPERTS-1:0] != {NUM_EXPERTS{1'b0}}) begin
+                                selected_expert_id_r <= first_selected_expert(remaining_bitmap_r);
+                                selected_expert_mask_r <= expert_onehot(first_selected_expert(remaining_bitmap_r));
+                                remaining_bitmap_r <= remaining_bitmap_r &
+                                                      ~expert_onehot(first_selected_expert(remaining_bitmap_r));
+                                state <= S_HEADER;
+                            end
+                            else begin
+                                state <= S_IDLE;
+                            end
                         end
                         else begin
                             payload_beat_count <= payload_beat_count + 4'd1;

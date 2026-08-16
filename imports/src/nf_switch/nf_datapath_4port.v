@@ -26,7 +26,8 @@ module nf_datapath_4port #(
     parameter C_S_AXIS_DATA_WIDTH   = 512,
     parameter C_M_AXIS_TUSER_WIDTH  = 128,
     parameter C_S_AXIS_TUSER_WIDTH  = 128,
-    parameter NUM_QUEUES            = 4
+    parameter NUM_QUEUES            = 4,
+    parameter [15:0] MOE_EXPERT_PORT_MASK_FLAT = 16'h0201
 )(
     // Datapath clock / reset (low-active resetn)
     input                                     axis_aclk,
@@ -489,7 +490,13 @@ module nf_datapath_4port #(
     allreduce_offload_wrapper #(
         .DATA_W (C_M_AXIS_DATA_WIDTH),
         .KEEP_W (C_M_AXIS_DATA_WIDTH/8),
-        .TUSER_W (C_M_AXIS_TUSER_WIDTH)
+        .TUSER_W (C_M_AXIS_TUSER_WIDTH),
+        .ENABLE_MOE_COMBINE(1),
+        .MOE_WINDOW_SIZE(8),
+        .MOE_USE_REAL_PAYLOAD(1),
+        .ENABLE_MOE_DISPATCH_INIT(1),
+        .ENABLE_MOE_DISPATCH_EGRESS(1),
+        .MOE_EXPERT_PORT_MASK_FLAT(MOE_EXPERT_PORT_MASK_FLAT)
     ) u_allreduce_wrapper (
         .clk    (allreduce_clk),
         .rst_n  (allreduce_rst_n),
